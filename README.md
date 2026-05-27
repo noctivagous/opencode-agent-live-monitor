@@ -27,7 +27,7 @@ npx opencode-agent-live-monitor
 
 | Tab | URL | Description |
 |-----|-----|-------------|
-| **Explorer** | `/explorer` | Active files by folder, agent status, activity log |
+| **Activity** | `/explorer` | Active files by folder, agent status, activity log |
 | **Tree** | `/tree` | Horizontal D3 tree — full project index, pan/zoom, activity capsules |
 | **Treemap** | `/treemap` | Drill-down treemap; gray = untouched; click files for preview |
 | **Radial** | `/radial` | Radial cluster of the project tree with activity highlights |
@@ -35,7 +35,7 @@ npx opencode-agent-live-monitor
 
 ## Features by view
 
-### Explorer
+### Activity
 - Recent files grouped by directory with action badges
 - Live activity log and agent status (running / complete + summary)
 
@@ -67,7 +67,7 @@ npx opencode-agent-live-monitor
 AICodeEditorMonitor/
 ├── server.js                 # HTTP + WebSocket relay, state cache, /preview API
 ├── dashboard.html            # Tab shell (iframes)
-├── index.html                # Explorer
+├── index.html                # Activity (active files + log)
 ├── index-tree.html           # Tree view
 ├── index-treemap.html        # Treemap view
 ├── index-radial.html         # Radial cluster view
@@ -123,11 +123,11 @@ The dashboard server must be running before OpenCode connects.
 | `project_index` | Full project file tree (gray baseline) |
 | `update` | Tree snapshot + active files + log lines |
 | `session_reset` | Reset visited colors; new prompt on treemap/horizon |
-| `agent_status` | `prompt_submitted`, `working`, `complete` + optional summary |
+| `agent_status` | `prompt_submitted`, `working`, `complete` + optional summary (UI only; dashboard popover uses `session_idle`) |
 | `activity_event` | Timestamped file action for Horizon |
 | `activity_batch` | Replay recent `activity_event`s on browser connect |
 | `file_progress` | Active write path for treemap spinner |
-| `status` | Plugin connected / waiting / `session_idle` |
+| `status` | Plugin connected / waiting / `session_idle` (true prompt end — drives “Prompt complete” popover) |
 
 ### Example `activity_event`
 
@@ -150,7 +150,7 @@ Actions include `read`, `edit`, `list`, `glob`, `grep`, `write`.
 flowchart LR
   OpenCode[OpenCode + plugin] -->|WebSocket| Server[server.js]
   Server -->|relay + replay| Browser[dashboard.html]
-  Browser --> Explorer
+  Browser --> Activity
   Browser --> Tree
   Browser --> Treemap
   Browser --> Radial

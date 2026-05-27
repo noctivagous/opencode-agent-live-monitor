@@ -1,0 +1,105 @@
+/**
+ * Shared view toolbar (bar beneath dashboard tabs). Height matches Activity tab.
+ */
+.monitor-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  border-bottom: 1px solid #27272a;
+  background: #18181b;
+  padding: 0.5rem 1rem;
+  min-height: 2.75rem;
+  box-sizing: border-box;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.monitor-toolbar .view-title {
+  font-weight: 600;
+  color: #d4d4d8;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.monitor-toolbar .toolbar-hint {
+  font-size: 0.75rem;
+  color: #52525b;
+}
+
+.monitor-badge {
+  border-radius: 9999px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.monitor-badge--sm {
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* Font Awesome spacing (load all.min.css in page head) */
+.fa-icon {
+  width: 1em;
+  text-align: center;
+}
+
+.fa-icon-sm {
+  font-size: 0.75em;
+  width: 1em;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.section-title .fa-icon {
+  color: #a78bfa;
+  opacity: 0.9;
+}
+
+.toolbar-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.monitor-zoom-pct {
+  min-width: 2.75rem;
+}
+
+.monitor-legend {
+  color: #a1a1aa;
+}
+
+.monitor-timeline-scale input[type="range"] {
+  width: 5.5rem;
+  height: 0.25rem;
+  accent-color: #7c3aed;
+  cursor: pointer;
+}
+
+#chart .cell .body {
+  transition: filter 0.12s ease, stroke 0.12s ease;
+}
+
+#chart .cell--dir .body {
+  cursor: pointer;
+}
+
+#chart .cell--file .body {
+  cursor: pointer;
+}
+
+#chart .cell:hover .body {
+  filter: brightness(1.2);
+  stroke: #71717a;
+}

@@ -4,11 +4,24 @@
   <meta charset="UTF-8">
   <title>Agent Monitor — Treemap</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/monitor-chrome.css" />
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
   <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="/monitor-highlights.js"></script>
+  <script src="/monitor-zoom.js"></script>
+  <script src="/monitor-preview.js"></script>
+  <script src="/monitor-badges.js"></script>
+  <script src="/monitor-legend.js"></script>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
-    #chart { flex: 1; min-height: 0; overflow: hidden; }
+    #chart { flex: 1; min-height: 0; overflow: hidden; cursor: grab; }
+    #chart:active { cursor: grabbing; }
     #chart svg { display: block; width: 100%; height: 100%; }
     @keyframes monitor-spin { to { transform: rotate(360deg); } }
     .write-spinner-ring {
@@ -19,51 +32,34 @@
   </style>
 </head>
 <body class="text-zinc-200">
-  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950">
-    <div id="status-line" class="px-3 py-2 text-sm border-b border-zinc-800/80 bg-zinc-900/80 text-zinc-300 min-h-[2.75rem]">
-      <div id="status-prompt" class="text-xs text-zinc-500 truncate mb-0.5 hidden"></div>
-      <div id="status-summary" class="text-xs text-emerald-400/90 truncate mb-0.5 hidden"></div>
-      <div id="status-run" class="text-zinc-200">Connecting…</div>
-    </div>
-    <div class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
-      <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
-      <span class="font-semibold text-sm">Treemap</span>
-      <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">Browser…</span>
-      <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">Plugin…</span>
-      <span id="status-index" class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">Index…</span>
-      <nav id="breadcrumb" class="flex flex-wrap items-center gap-1 font-mono text-zinc-400"></nav>
-      <span class="ml-auto text-zinc-600">Gray = untouched · click folder to zoom</span>
+  <header class="monitor-toolbar">
+    <a href="/" class="toolbar-link text-zinc-500 hover:text-zinc-300 text-xs">
+      <i class="fa-solid fa-table-columns fa-icon-sm" aria-hidden="true"></i>
+      Dashboard
+    </a>
+    <span class="view-title">
+      <i class="fa-solid fa-table-cells fa-icon" aria-hidden="true"></i>
+      Treemap
+    </span>
+    <span id="status-browser" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Browser…</span>
+    <span id="status-plugin" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Plugin…</span>
+    <span id="status-index" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Index…</span>
+    <span id="status-run" class="text-xs text-zinc-300 truncate max-w-[12rem]" title="">Connecting…</span>
+    <nav id="breadcrumb" class="flex flex-wrap items-center gap-1 font-mono text-xs text-zinc-400 min-w-0"></nav>
+    <span class="ml-auto flex flex-wrap items-center gap-2 shrink-0">
+      <span id="action-legend"></span>
+      <span id="treemap-zoom-toolbar"></span>
+    </span>
+    <div class="hidden" aria-hidden="true">
+      <div id="status-prompt"></div>
+      <div id="status-summary"></div>
     </div>
   </header>
 
   <div id="chart"></div>
 
-  <div
-    id="preview-popover"
-    class="fixed right-4 top-20 w-[400px] h-[500px] max-w-full max-h-[calc(100vh-6rem)] bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl shadow-black/70 hidden z-50 flex flex-col overflow-hidden"
-  >
-    <div class="flex items-center justify-between px-3 py-2 border-b border-zinc-800 bg-zinc-900/90 text-xs">
-      <div class="flex flex-col overflow-hidden">
-        <span id="preview-title" class="font-mono truncate text-zinc-200">Preview</span>
-        <span id="preview-subtitle" class="text-[10px] text-zinc-500 truncate">—</span>
-      </div>
-      <button
-        id="preview-close"
-        type="button"
-        class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
-      >
-        Close
-      </button>
-    </div>
-    <div class="flex-1 min-h-0 bg-zinc-950/95">
-      <pre
-        id="preview-body"
-        class="h-full w-full text-[11px] leading-relaxed font-mono text-zinc-200 px-3 py-2 overflow-auto whitespace-pre-wrap"
-      ></pre>
-    </div>
-  </div>
-
   <script>
+    const { setBadge } = MonitorBadges;
     /** Must match plugin SHOW_GLOBS — when false, glob touches are ignored. */
     const SHOW_GLOBS = false;
     /** Must match plugin RESET_VISITED_ON_PROMPT. */
@@ -83,8 +79,6 @@
     const TITLE_BAR = 20;
     const ACTION_BAR = 18;
     const FLASH_MS = 2000;
-    const ICON_DIR = "\u{1F4C1}";
-    const ICON_FILE = "\u{1F4C4}";
 
     let baseTree = null;
     let indexSnapshot = null;
@@ -99,7 +93,30 @@
     let width = 0;
     let height = 0;
     let svg, cellLayer, labelLayer, spinnerLayer;
-    let previewPath = "";
+    const { createZoomHost } = MonitorZoom;
+    const { init: initPreview, open: openPreview, close: closePreview } = MonitorPreview;
+    const zoomHost = createZoomHost({ scaleExtent: [0.2, 4] });
+    let frameToFit = false;
+
+    function notifyParent(type, payload = {}) {
+      try {
+        window.parent?.postMessage(
+          {
+            source: "AICodeEditorMonitor",
+            type,
+            payload,
+          },
+          "*"
+        );
+      } catch {}
+    }
+
+    function notifyProjectInfo(data) {
+      notifyParent("project-info", {
+        projectRoot: data?.projectRoot || "",
+        projectLabel: data?.projectLabel || data?.tree?.name || projectLabel,
+      });
+    }
 
     function cloneNode(n) {
       return {
@@ -131,6 +148,12 @@
       return null;
     }
 
+    function parentPath(pathValue) {
+      const p = normPath(pathValue);
+      if (!p || !p.includes("/")) return "";
+      return p.slice(0, p.lastIndexOf("/"));
+    }
+
     function resetVisited(node) {
       node.visited = false;
       node.action = null;
@@ -157,7 +180,8 @@
         grayTreemapFromIndex();
       }
       setRunStatus("~ Treemap reset — all cells gray until agent acts", "muted");
-      render();
+      frameToFit = true;
+      render({ preserveZoom: false });
     }
 
     function applyPromptSubmittedReset(data) {
@@ -241,8 +265,44 @@
     }
 
     function displayName(d) {
-      const icon = d.data.type === "dir" ? ICON_DIR : ICON_FILE;
-      return `${icon} ${d.data.name}`;
+      return d.data.name;
+    }
+
+    /** Inline SVG icons (Font Awesome does not render inside SVG text). */
+    const TREEMAP_ICON = {
+      dir: {
+        d: "M1.5 3h4.2l1.3 1.8H12v6.7H1.5V3z",
+        vb: 13,
+      },
+      file: {
+        d: "M3 2h4.2L9.5 4.2V11H3V2zm4.2 0V4.2H9.5",
+        vb: 12,
+      },
+    };
+
+    function iconFill(d, isDir) {
+      if (!d.data.visited) return isDir ? "#71717a" : "#52525b";
+      return isDir ? "#a78bfa" : "#93c5fd";
+    }
+
+    function appendTreemapIcon(g, d, x, cy, size) {
+      const isDir = !!d.children;
+      const spec = TREEMAP_ICON[isDir ? "dir" : "file"];
+      const s = size / spec.vb;
+      g.append("g")
+        .attr("class", `treemap-icon treemap-icon--${isDir ? "dir" : "file"}`)
+        .attr(
+          "transform",
+          `translate(${x},${cy}) scale(${s}) translate(0,${-spec.vb / 2})`
+        )
+        .append("path")
+        .attr("d", spec.d)
+        .attr("fill", iconFill(d, isDir))
+        .attr("fill-rule", "evenodd");
+    }
+
+    function truncateLabel(name, maxChars) {
+      return name.length > maxChars ? name.slice(0, maxChars - 1) + "…" : name;
     }
 
     function fillColor(d) {
@@ -316,27 +376,40 @@
       el.className = tones[tone] || tones.muted;
     }
 
-    function setBadge(id, text, tone) {
-      const tones = {
-        ok: "bg-emerald-950 text-emerald-300",
-        warn: "bg-amber-950 text-amber-300",
-        bad: "bg-red-950 text-red-300",
-        idle: "bg-zinc-800 text-zinc-400",
-      };
-      const el = document.getElementById(id);
-      el.textContent = text;
-      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
-    }
-
     function ensureChart() {
       const el = document.getElementById("chart");
       width = el.clientWidth;
       height = el.clientHeight;
-      d3.select("#chart").selectAll("svg").remove();
-      svg = d3.select("#chart").append("svg").attr("width", width).attr("height", height);
-      cellLayer = svg.append("g");
-      labelLayer = svg.append("g");
-      spinnerLayer = svg.append("g").attr("class", "spinners");
+      let root = d3.select("#chart").select("svg");
+      if (root.empty()) {
+        svg = d3.select("#chart").append("svg").attr("width", width).attr("height", height);
+        const zoomLayer = svg.append("g").attr("class", "zoom-layer");
+        cellLayer = zoomLayer.append("g").attr("class", "cells");
+        labelLayer = zoomLayer.append("g").attr("class", "labels");
+        spinnerLayer = zoomLayer.append("g").attr("class", "spinners");
+        zoomHost.bind(svg, zoomLayer, el);
+      } else {
+        svg = root;
+        svg.attr("width", width).attr("height", height);
+        const zoomLayer = svg.select(".zoom-layer");
+        cellLayer = zoomLayer.select(".cells");
+        labelLayer = zoomLayer.select(".labels");
+        spinnerLayer = zoomLayer.select(".spinners");
+      }
+    }
+
+    function applyZoomAfterRender(opts = {}) {
+      if (frameToFit) {
+        zoomHost.fitToContent(
+          { x0: 0, y0: 0, x1: width, y1: height },
+          width,
+          height,
+          12
+        );
+        frameToFit = false;
+      } else if (opts.preserveZoom !== false && zoomHost.getBehavior()) {
+        svg.call(zoomHost.getBehavior().transform, zoomHost.getTransform());
+      }
     }
 
     function drawWriteSpinner(nodes) {
@@ -396,9 +469,15 @@
         .filter(Boolean)
         .map((n, i) => {
           const isLast = i === chain.length - 1;
-          const label = n.path === "" ? projectLabel : `${ICON_DIR} ${n.name}`;
-          if (isLast) return `<span class="text-zinc-200">${label}</span>`;
-          return `<button type="button" data-path="${n.path}" class="text-violet-400 hover:underline">${label}</button><span class="text-zinc-600">/</span>`;
+          const folderIcon =
+            '<i class="fa-solid fa-folder fa-icon-sm" aria-hidden="true"></i>';
+          const label =
+            n.path === "" ? `${folderIcon} ${projectLabel}` : `${folderIcon} ${n.name}`;
+          if (isLast) {
+            if (!n.path) return `<span class="text-zinc-200 inline-flex items-center gap-1">${label}</span>`;
+            return `<button type="button" data-path="${parentPath(n.path)}" class="text-zinc-200 hover:underline inline-flex items-center gap-1" title="Close folder">${label}<i class="fa-solid fa-angle-up fa-icon-sm" aria-hidden="true"></i></button>`;
+          }
+          return `<button type="button" data-path="${n.path}" class="text-violet-400 hover:underline inline-flex items-center gap-1">${label}</button><span class="text-zinc-600">/</span>`;
         })
         .join("");
       nav.querySelectorAll("button").forEach((btn) => {
@@ -409,46 +488,20 @@
       });
     }
 
-    function closePreview() {
-      previewPath = "";
-      const pop = document.getElementById("preview-popover");
-      if (pop) pop.classList.add("hidden");
-    }
-
-    async function openPreview(path, label) {
-      previewPath = path || "";
-      const pop = document.getElementById("preview-popover");
-      const titleEl = document.getElementById("preview-title");
-      const subtitleEl = document.getElementById("preview-subtitle");
-      const bodyEl = document.getElementById("preview-body");
-      if (!pop || !titleEl || !subtitleEl || !bodyEl || !previewPath) return;
-
-      titleEl.textContent = label || previewPath.split("/").pop() || previewPath;
-      subtitleEl.textContent = previewPath;
-      bodyEl.textContent = "Loading preview…";
-      pop.classList.remove("hidden");
-
-      try {
-        const resp = await fetch(
-          `/preview?path=${encodeURIComponent(normPath(previewPath))}`
-        );
-        if (!resp.ok) {
-          bodyEl.textContent = `Unable to load preview (HTTP ${resp.status}).`;
-          return;
-        }
-        const text = await resp.text();
-        bodyEl.textContent = text || "[File is empty]";
-      } catch (err) {
-        bodyEl.textContent = "Error loading preview.";
-      }
-    }
-
-    function render() {
+    function render(opts = {}) {
       expireFlashes();
+      const preserveZoom = opts.preserveZoom !== false && !frameToFit;
+
+      const chartEl = document.getElementById("chart");
+      if (chartEl.querySelector("svg") && preserveZoom) {
+        zoomHost.captureFromSvg();
+      }
 
       if (!baseTree) {
+        d3.select("#chart").selectAll("svg").remove();
         ensureChart();
-        svg
+        svg.on("click", null);
+        cellLayer
           .append("text")
           .attr("x", width / 2)
           .attr("y", height / 2)
@@ -478,9 +531,17 @@
 
       const nodes = root.descendants().filter((d) => d.depth > 0);
       ensureChart();
+      cellLayer.selectAll("*").remove();
+      labelLayer.selectAll("*").remove();
+      spinnerLayer.selectAll("*").remove();
+      svg.on("click", () => {
+        if (!viewPath) return;
+        viewPath = parentPath(viewPath);
+        render();
+      });
 
       if (nodes.length === 0) {
-        svg
+        cellLayer
           .append("text")
           .attr("x", width / 2)
           .attr("y", height / 2)
@@ -488,6 +549,7 @@
           .attr("fill", "#71717a")
           .text("No files in this folder — use breadcrumb to go up.");
         renderBreadcrumb();
+        applyZoomAfterRender({ preserveZoom });
         return;
       }
 
@@ -495,7 +557,7 @@
         .selectAll("g.cell")
         .data(nodes, (d) => d.data.path)
         .join("g")
-        .attr("class", "cell")
+        .attr("class", (d) => `cell cell--${d.children ? "dir" : "file"}`)
         .attr("transform", (d) => `translate(${d.x0},${d.y0})`);
 
       cell
@@ -506,12 +568,12 @@
         .attr("fill", (d) => fillColor(d))
         .attr("stroke", "#09090b")
         .attr("stroke-width", 1)
-        .style("cursor", (d) => (d.children ? "pointer" : "text"))
+        .style("cursor", "pointer")
         .lower()
         .on("click", (event, d) => {
           event.stopPropagation();
           if (d.children) {
-            viewPath = d.data.path;
+            viewPath = viewPath === d.data.path ? parentPath(viewPath) : d.data.path;
             render();
           } else if (d.data.path) {
             openPreview(d.data.path, d.data.name);
@@ -539,9 +601,13 @@
         }
 
         if (isDir) {
+          const iconSize = Math.min(12, Math.max(8, barH - 5));
+          const textX = 6 + iconSize + 4;
+          const labelY = barH / 2;
+          appendTreemapIcon(g, d, 6, labelY, iconSize);
           g.append("text")
-            .attr("x", 6)
-            .attr("y", barH / 2)
+            .attr("x", textX)
+            .attr("y", labelY)
             .attr("dominant-baseline", "middle")
             .attr("fill", d.data.visited ? "#e4e4e7" : "#a1a1aa")
             .attr("font-size", Math.min(12, barH - 4))
@@ -549,8 +615,8 @@
             .attr("font-weight", 600)
             .text(() => {
               const label = displayName(d);
-              const max = Math.max(4, Math.floor((w - (showActionLabel ? 52 : 12)) / 7));
-              return label.length > max ? label.slice(0, max - 1) + "…" : label;
+              const max = Math.max(4, Math.floor((w - (showActionLabel ? 52 : textX + 6)) / 7));
+              return truncateLabel(label, max);
             });
           if (showActionLabel) {
             g.append("text")
@@ -590,24 +656,35 @@
           const w = d.x1 - d.x0;
           const h = d.y1 - d.y0;
           const top = titleBarHeight(d);
-          g.selectAll("text").remove();
-          if (w < 36) return;
+          g.selectAll("text, .treemap-icon").remove();
+          const midY = top + (h - top) / 2;
+          const iconSize = Math.min(11, Math.max(8, (h - top) / 2.5));
+          const textX = 6 + iconSize + 4;
+          if (w < 28) return;
+          appendTreemapIcon(g, d, 6, midY, iconSize);
+          if (w < textX + 14) return;
           g.append("text")
-            .attr("x", 6)
-            .attr("y", top + (h - top) / 2)
+            .attr("x", textX)
+            .attr("y", midY)
             .attr("dominant-baseline", "middle")
             .attr("fill", d.data.visited ? "#d4d4d8" : "#a1a1aa")
             .attr("font-size", Math.min(11, (h - top) / 2))
             .attr("font-family", "ui-monospace, monospace")
             .text(() => {
               const label = displayName(d);
-              const max = Math.max(4, Math.floor((w - 12) / 6));
-              return label.length > max ? label.slice(0, max - 1) + "…" : label;
+              const max = Math.max(4, Math.floor((w - textX - 6) / 6));
+              return truncateLabel(label, max);
             });
         });
 
       drawWriteSpinner(nodes);
+      cellLayer
+        .attr("opacity", 0)
+        .transition()
+        .duration(180)
+        .attr("opacity", 1);
       renderBreadcrumb();
+      applyZoomAfterRender({ preserveZoom });
     }
 
     function applyMessage(data) {
@@ -619,6 +696,7 @@
           updatePromptLine(lastPrompt);
         }
         if (phase === "prompt_submitted") {
+          notifyParent("prompt-submitted", { prompt: data.prompt, resetSeq: data.resetSeq });
           lastSummary = "";
           updateSummaryLine("");
           applyPromptSubmittedReset(data);
@@ -649,6 +727,7 @@
         if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
         if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
         if (data.status === "session_idle") {
+          notifyParent("prompt-complete", { summary: data.summary ?? null });
           if (data.summary) {
             lastSummary = data.summary;
             updateSummaryLine(lastSummary);
@@ -662,6 +741,7 @@
       }
 
       if (data.type === "session_reset") {
+        notifyParent("session-reset", { resetSeq: data.resetSeq });
         applySessionReset(data);
         return;
       }
@@ -672,7 +752,9 @@
         hasFullIndex = true;
         flashes.clear();
         projectLabel = data.projectLabel || data.tree.name || "project";
+        notifyProjectInfo(data);
         viewPath = "";
+        frameToFit = true;
         const meta = data.indexMeta;
         setBadge(
           "status-index",
@@ -713,14 +795,16 @@
 
     ws.onmessage = (event) => applyMessage(JSON.parse(event.data));
 
-    document.getElementById("preview-close")?.addEventListener("click", () => {
-      closePreview();
+    const { initLegend } = MonitorLegend;
+    const { attachZoomControls } = MonitorZoom;
+    initLegend(document.getElementById("action-legend"), { colors: ACTION_COLORS });
+    attachZoomControls(document.getElementById("treemap-zoom-toolbar"), zoomHost, {
+      hint: "Scroll/zoom · click folders to collapse",
     });
-    window.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closePreview();
-    });
+    initPreview();
+    render();
 
-    window.addEventListener("resize", () => render());
+    window.addEventListener("resize", () => render({ preserveZoom: true }));
     setInterval(() => {
       let needsRender = false;
       if (flashes.size > 0) {

@@ -4,14 +4,35 @@
   <meta charset="UTF-8">
   <title>Agent Monitor — Horizon</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/monitor-chrome.css" />
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
   <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="/monitor-zoom.js"></script>
+  <script src="/monitor-preview.js"></script>
+  <script src="/monitor-badges.js"></script>
+  <script src="/monitor-legend.js"></script>
   <style>
     html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
-    #horizon-scroll { flex: 1; min-h-0; overflow: auto; }
-    #horizon-chart svg { display: block; }
+    #horizon-viewport {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      cursor: grab;
+      position: relative;
+    }
+    #horizon-viewport:active { cursor: grabbing; }
+    #horizon-chart-inner { width: 100%; height: 100%; }
+    #horizon-chart-inner svg { display: block; }
     .dir-label { fill: #a78bfa; font-weight: 600; }
     .file-label { fill: #a1a1aa; }
+    .file-row-hit { fill: transparent; cursor: pointer; }
+    .file-row-hit:hover { fill: rgba(255, 255, 255, 0.04); }
     .axis text { fill: #71717a; font-size: 12px; }
     .axis line, .axis path { stroke: #3f3f46; }
     .prompt-marker { pointer-events: none; }
@@ -21,25 +42,50 @@
       font-weight: 600;
       pointer-events: none;
     }
+    .placeholder-dir { fill: #52525b; font-weight: 600; }
+    .placeholder-file { fill: #3f3f46; }
+    .placeholder-hint { fill: #71717a; font-size: 11px; }
   </style>
 </head>
 <body class="text-zinc-200">
-  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-2 text-sm">
-    <div class="flex flex-wrap items-center gap-3">
-      <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
-      <span class="font-semibold">Activity Horizon</span>
-      <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Browser…</span>
-      <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Plugin…</span>
-      <span id="status-prompt" class="text-xs text-zinc-500">Waiting for prompt…</span>
-      <span id="status-stats" class="text-xs text-zinc-500">—</span>
-      <span class="ml-auto flex flex-wrap items-center gap-2" id="legend"></span>
-    </div>
+  <header class="monitor-toolbar">
+    <a href="/" class="toolbar-link text-zinc-500 hover:text-zinc-300 text-xs">
+      <i class="fa-solid fa-table-columns fa-icon-sm" aria-hidden="true"></i>
+      Dashboard
+    </a>
+    <span class="view-title">
+      <i class="fa-solid fa-chart-area fa-icon" aria-hidden="true"></i>
+      Horizon
+    </span>
+    <span id="status-browser" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Browser…</span>
+    <span id="status-plugin" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Plugin…</span>
+    <span id="status-prompt" class="text-xs text-zinc-500 truncate max-w-[14rem]">Waiting for prompt…</span>
+    <span id="status-stats" class="text-xs text-zinc-500">—</span>
+    <span class="ml-auto flex flex-wrap items-center gap-2">
+      <label
+        class="monitor-timeline-scale inline-flex items-center gap-1.5 text-xs text-zinc-500"
+        title="Timeline horizontal scale (saved on server)"
+      >
+        <i class="fa-solid fa-sliders fa-icon-sm" aria-hidden="true"></i>
+        <input
+          type="range"
+          id="horizon-timeline-scale"
+          min="0.25"
+          max="4"
+          step="0.05"
+          value="1"
+        />
+      </label>
+      <span id="horizon-zoom-toolbar"></span>
+      <span id="action-legend"></span>
+    </span>
   </header>
-  <div id="horizon-scroll">
-    <div id="horizon-chart"></div>
+  <div id="horizon-viewport">
+    <div id="horizon-chart-inner"></div>
   </div>
 
   <script>
+    const { setBadge } = MonitorBadges;
     const SCALE = 1.2;
     const BUCKET_MS = 1000;
     const MAX_FILES = 80;
@@ -49,6 +95,17 @@
     const DIR_ROW_H = Math.round(18 * SCALE);
     const MARGIN_TOP = Math.round(28 * SCALE);
     const MARGIN_RIGHT = Math.round(16 * SCALE);
+
+    /** Skeleton rows shown while waiting for a prompt. */
+    const PLACEHOLDER_ROWS = [
+      { type: "dir", label: "src/" },
+      { type: "file", label: "index.ts" },
+      { type: "file", label: "app.ts" },
+      { type: "dir", label: "lib/" },
+      { type: "file", label: "utils.ts" },
+      { type: "dir", label: "tests/" },
+      { type: "file", label: "app.test.ts" },
+    ];
 
     const ACTION_COLORS = {
       read: "#2563eb",
@@ -62,22 +119,46 @@
 
     const events = [];
     const fileMeta = new Map();
+    const { createZoomHost, attachZoomControls } = MonitorZoom;
+    const { initLegend } = MonitorLegend;
+    const { init: initPreview, open: openPreview } = MonitorPreview;
+    const zoomHost = createZoomHost({ scaleExtent: [0.25, 3] });
+    let horizonNeedsFrame = true;
+    let timelineScale = 1;
+    let saveTimelineTimer = null;
 
     /** idle | running | frozen */
     let promptPhase = "idle";
     let promptStartAt = null;
     let promptEndAt = null;
+    const INACTIVITY_FREEZE_MS = 3000;
+    // Some OpenCode flows emit an early "complete/idle" while tool actions
+    // (edits/writes) are still happening. Allow a short grace period to reopen.
+    const UNFREEZE_GRACE_MS = 150;
+    let lastActivityAt = null;
+    let inactivityTimer = null;
 
-    function setBadge(id, text, tone) {
-      const tones = {
-        ok: "bg-emerald-950 text-emerald-300",
-        warn: "bg-amber-950 text-amber-300",
-        bad: "bg-red-950 text-red-300",
-        idle: "bg-zinc-800 text-zinc-400",
-      };
-      const el = document.getElementById(id);
-      el.textContent = text;
-      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    function clearInactivityTimer() {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = null;
+    }
+
+    function scheduleInactivityFreeze() {
+      clearInactivityTimer();
+      if (promptPhase !== "running") return;
+      if (lastActivityAt == null) return;
+      inactivityTimer = setTimeout(() => {
+        if (promptPhase !== "running") return;
+        if (lastActivityAt == null) return;
+        if (Date.now() - lastActivityAt >= INACTIVITY_FREEZE_MS) {
+          endPrompt(Date.now());
+        }
+      }, INACTIVITY_FREEZE_MS + 50);
+    }
+
+    function chartWidthForViewport(cw) {
+      const base = Math.max(400, cw - GUTTER - MARGIN_RIGHT);
+      return Math.max(400, base * timelineScale);
     }
 
     function normPath(p) {
@@ -103,17 +184,20 @@
     function updatePromptStatus() {
       const el = document.getElementById("status-prompt");
       if (promptPhase === "idle") {
-        el.textContent = "Waiting for prompt…";
-        el.className = "text-xs text-zinc-500";
+        el.innerHTML =
+          '<i class="fa-solid fa-hourglass-half fa-icon-sm" aria-hidden="true"></i> Waiting for prompt…';
+        el.className = "text-xs text-zinc-500 inline-flex items-center gap-1.5 truncate max-w-[14rem]";
         return;
       }
       if (promptPhase === "running") {
-        el.textContent = "Prompt running — timeline live";
-        el.className = "text-xs text-violet-300";
+        el.innerHTML =
+          '<i class="fa-solid fa-bolt fa-icon-sm" aria-hidden="true"></i> Prompt running — timeline live';
+        el.className = "text-xs text-violet-300 inline-flex items-center gap-1.5 truncate max-w-[14rem]";
         return;
       }
-      el.textContent = "Prompt complete — timeline frozen";
-      el.className = "text-xs text-sky-400";
+      el.innerHTML =
+        '<i class="fa-solid fa-snowflake fa-icon-sm" aria-hidden="true"></i> Prompt complete — timeline frozen';
+      el.className = "text-xs text-sky-400 inline-flex items-center gap-1.5 truncate max-w-[14rem]";
     }
 
     function beginPrompt(at) {
@@ -122,12 +206,16 @@
       promptStartAt = at ?? Date.now();
       promptEndAt = null;
       promptPhase = "running";
+      lastActivityAt = null;
+      clearInactivityTimer();
+      horizonNeedsFrame = true;
       updatePromptStatus();
       render();
     }
 
     function endPrompt(at) {
       if (promptPhase !== "running" || promptStartAt == null) return;
+      clearInactivityTimer();
       promptEndAt = at ?? Date.now();
       if (promptEndAt < promptStartAt) promptEndAt = promptStartAt + 1;
       promptPhase = "frozen";
@@ -143,11 +231,27 @@
       while (events.length && events[events.length - 1].at > t1) events.pop();
     }
 
-    function ingestEvent(ev) {
-      if (promptPhase === "frozen" || promptPhase === "idle") return;
+    function ingestEvent(ev, { replay = false } = {}) {
       const path = normPath(ev.path);
       if (!path) return;
       const at = ev.at || Date.now();
+
+      if (promptPhase === "idle") {
+        beginPrompt(at);
+      }
+
+      if (promptPhase === "frozen" && !replay) {
+        // If we froze on a premature "complete/idle" but new activity arrives
+        // (edits/writes), reopen and keep the same prompt segment.
+        if (promptEndAt != null && at > promptEndAt + UNFREEZE_GRACE_MS) {
+          promptPhase = "running";
+          promptEndAt = null;
+          updatePromptStatus();
+        } else {
+          return;
+        }
+      }
+
       if (promptStartAt != null && at < promptStartAt) return;
       const action = ev.action || "read";
       const dir =
@@ -168,6 +272,9 @@
         }
         for (const p of drop) fileMeta.delete(p);
       }
+
+      lastActivityAt = at;
+      if (promptPhase === "running") scheduleInactivityFreeze();
     }
 
     function buildRows() {
@@ -239,6 +346,114 @@
       });
     }
 
+    function drawEmptyFileRow(g, rowY, rowH, x, t0, t1) {
+      const mid = rowY + rowH / 2;
+      g.append("line")
+        .attr("x1", GUTTER)
+        .attr("x2", x(t1))
+        .attr("y1", mid)
+        .attr("y2", mid)
+        .attr("stroke", "#27272a")
+        .attr("stroke-width", 1);
+      const n = Math.max(1, Math.ceil((t1 - t0) / BUCKET_MS));
+      const bw = Math.max(1, x(t0 + BUCKET_MS) - x(t0) - 0.5);
+      for (let i = 0; i < n; i += 4) {
+        g.append("rect")
+          .attr("x", x(t0 + i * BUCKET_MS))
+          .attr("y", mid - 2)
+          .attr("width", bw)
+          .attr("height", 4)
+          .attr("fill", "#27272a")
+          .attr("opacity", 0.35);
+      }
+    }
+
+    function renderPlaceholderChart(viewport, inner, shouldFrame, savedTransform) {
+      const now = Date.now();
+      const t0 = now - MIN_PROMPT_SPAN_MS;
+      const t1 = now;
+      const rows = PLACEHOLDER_ROWS;
+      const cw = viewport.clientWidth || 800;
+      const ch = viewport.clientHeight || 400;
+      const chartW = chartWidthForViewport(cw);
+      const svgW = Math.max(cw, GUTTER + chartW + MARGIN_RIGHT);
+      const totalH =
+        MARGIN_TOP +
+        rows.reduce((s, r) => s + (r.type === "dir" ? DIR_ROW_H : ROW_H), 0) +
+        Math.round(16 * SCALE);
+      const svgH = Math.max(ch, totalH);
+      const chartBottom = Math.max(MARGIN_TOP + 40, totalH);
+
+      const svg = d3
+        .select(inner)
+        .append("svg")
+        .attr("width", svgW)
+        .attr("height", svgH);
+
+      const zoomLayer = svg.append("g").attr("class", "zoom-layer");
+      const x = d3.scaleTime().domain([t0, t1]).range([GUTTER, GUTTER + chartW]);
+      const g = zoomLayer.append("g");
+
+      g.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${MARGIN_TOP - 8})`)
+        .call(d3.axisTop(x).ticks(6).tickFormat(d3.timeFormat("%H:%M:%S")));
+
+      g.append("text")
+        .attr("class", "placeholder-hint")
+        .attr("x", GUTTER + chartW / 2)
+        .attr("y", MARGIN_TOP + 14)
+        .attr("text-anchor", "middle")
+        .text("Waiting for a new prompt. Activity for each prompt is shown from start to complete.");
+
+      g.append("line")
+        .attr("class", "prompt-marker prompt-start")
+        .attr("x1", x(t0))
+        .attr("x2", x(t0))
+        .attr("y1", MARGIN_TOP)
+        .attr("y2", chartBottom)
+        .attr("stroke", "#3f3f46")
+        .attr("stroke-width", 1.5)
+        .attr("stroke-dasharray", "4 4")
+        .attr("opacity", 0.6);
+
+      let y = MARGIN_TOP + Math.round(22 * SCALE);
+      for (const row of rows) {
+        const rh = row.type === "dir" ? DIR_ROW_H : ROW_H;
+        g.append("text")
+          .attr("class", row.type === "dir" ? "placeholder-dir" : "placeholder-file")
+          .attr("x", row.type === "dir" ? 8 : 20)
+          .attr("y", y + rh / 2)
+          .attr("dominant-baseline", "middle")
+          .attr("font-size", row.type === "dir" ? Math.round(11 * SCALE) : Math.round(10 * SCALE))
+          .attr("font-family", "ui-monospace, monospace")
+          .text(row.label);
+
+        if (row.type === "file") {
+          drawEmptyFileRow(g, y, rh, x, t0, t1);
+        } else {
+          g.append("rect")
+            .attr("x", 0)
+            .attr("y", y)
+            .attr("width", svgW)
+            .attr("height", rh)
+            .attr("fill", "#18181b")
+            .attr("opacity", 0.35);
+        }
+        y += rh;
+      }
+
+      document.getElementById("status-stats").textContent = "—";
+
+      zoomHost.bind(svg, zoomLayer, viewport);
+      if (shouldFrame) {
+        zoomHost.fitToContent({ x0: 0, y0: 0, x1: svgW, y1: svgH }, cw, ch, 24);
+        horizonNeedsFrame = false;
+      } else {
+        svg.call(zoomHost.getBehavior().transform, savedTransform);
+      }
+    }
+
     function drawPromptMarker(g, x, time, yTop, yBottom, kind) {
       if (time == null) return;
       const px = x(time);
@@ -264,38 +479,44 @@
     function render() {
       if (promptPhase !== "idle") pruneEvents();
 
-      const scrollEl = document.getElementById("horizon-scroll");
-      const chartEl = document.getElementById("horizon-chart");
+      const viewport = document.getElementById("horizon-viewport");
+      const inner = document.getElementById("horizon-chart-inner");
       const range = timeRange();
+      const shouldFrame = horizonNeedsFrame;
+      const existingSvg = inner.querySelector("svg");
+      const savedTransform = existingSvg
+        ? d3.zoomTransform(existingSvg)
+        : zoomHost.getTransform();
 
-      chartEl.innerHTML = "";
+      inner.innerHTML = "";
 
       if (promptPhase === "idle" || !range) {
-        chartEl.innerHTML =
-          '<p class="text-zinc-500 text-sm text-center py-16">Waiting for a new prompt. Activity for each prompt is shown from start to complete.</p>';
-        document.getElementById("status-stats").textContent = "—";
+        renderPlaceholderChart(viewport, inner, shouldFrame, savedTransform);
         return;
       }
 
       const rows = buildRows();
       const [t0, t1] = range;
-      const cw = scrollEl.clientWidth || 800;
-      const chartW = Math.max(400, cw - GUTTER - MARGIN_RIGHT);
-      const svgW = cw;
+      const cw = viewport.clientWidth || 800;
+      const ch = viewport.clientHeight || 400;
+      const chartW = chartWidthForViewport(cw);
+      const svgW = Math.max(cw, GUTTER + chartW + MARGIN_RIGHT);
       const totalH =
         MARGIN_TOP +
         rows.reduce((s, r) => s + (r.type === "dir" ? DIR_ROW_H : ROW_H), 0) +
         Math.round(16 * SCALE);
+      const svgH = Math.max(ch, totalH);
       const chartBottom = Math.max(MARGIN_TOP + 40, totalH);
 
       const svg = d3
-        .select("#horizon-chart")
+        .select("#horizon-chart-inner")
         .append("svg")
         .attr("width", svgW)
-        .attr("height", Math.max(scrollEl.clientHeight || 300, totalH));
+        .attr("height", svgH);
 
+      const zoomLayer = svg.append("g").attr("class", "zoom-layer");
       const x = d3.scaleTime().domain([t0, t1]).range([GUTTER, GUTTER + chartW]);
-      const g = svg.append("g");
+      const g = zoomLayer.append("g");
 
       g.append("g")
         .attr("class", "axis")
@@ -341,6 +562,16 @@
             .attr("stroke", "#27272a")
             .attr("stroke-width", 1);
           drawHorizonRow(g, y, rh, row.path, x, t0, t1);
+          g.append("rect")
+            .attr("class", "file-row-hit")
+            .attr("x", 0)
+            .attr("y", y)
+            .attr("width", svgW)
+            .attr("height", rh)
+            .on("click", (event) => {
+              event.stopPropagation();
+              openPreview(row.path, row.label);
+            });
         } else {
           g.append("rect")
             .attr("x", 0)
@@ -357,34 +588,55 @@
       const phaseLabel = promptPhase === "frozen" ? "frozen" : "live";
       document.getElementById("status-stats").textContent =
         `${events.length} events · ${fileMeta.size} files · ${durSec}s · ${phaseLabel}`;
-    }
 
-    const LEGEND_FONT_PX = Math.round(10 * SCALE);
-    const LEGEND_SWATCH_PX = Math.round(8 * SCALE);
-
-    function initLegend() {
-      const el = document.getElementById("legend");
-      el.innerHTML = Object.entries(ACTION_COLORS)
-        .filter(([k]) => k !== "bash")
-        .map(
-          ([k, c]) =>
-            `<span class="flex items-center gap-1.5" style="font-size:${LEGEND_FONT_PX}px;line-height:1.2">` +
-            `<span class="inline-block rounded-sm shrink-0" style="background:${c};width:${LEGEND_SWATCH_PX}px;height:${LEGEND_SWATCH_PX}px"></span>` +
-            `${k}</span>`
-        )
-        .join("");
+      zoomHost.bind(svg, zoomLayer, viewport);
+      if (shouldFrame) {
+        zoomHost.fitToContent(
+          { x0: 0, y0: 0, x1: svgW, y1: svgH },
+          cw,
+          ch,
+          24
+        );
+        horizonNeedsFrame = false;
+      } else {
+        svg.call(zoomHost.getBehavior().transform, savedTransform);
+      }
     }
 
     function handleAgentStatus(data) {
       const phase = data.phase;
       const at = data.at ?? Date.now();
       if (phase === "prompt_submitted") {
+        try {
+          window.parent?.postMessage(
+            {
+              source: "AICodeEditorMonitor",
+              type: "prompt-submitted",
+              payload: { prompt: data.prompt, resetSeq: data.resetSeq },
+            },
+            "*"
+          );
+        } catch {}
         beginPrompt(at);
         return;
       }
-      if (phase === "complete" || phase === "idle") {
-        endPrompt(at);
+      if (phase === "working" && promptPhase === "idle") {
+        beginPrompt(at);
+        return;
       }
+    }
+
+    function notifyParentSessionReset(resetSeq) {
+      try {
+        window.parent?.postMessage(
+          {
+            source: "AICodeEditorMonitor",
+            type: "session-reset",
+            payload: { resetSeq },
+          },
+          "*"
+        );
+      } catch {}
     }
 
     function applyMessage(data) {
@@ -400,29 +652,102 @@
       }
 
       if (data.type === "activity_batch" && Array.isArray(data.events)) {
-        if (promptPhase === "running") {
-          for (const ev of data.events) ingestEvent(ev);
-          render();
+        const evs = data.events.filter((ev) => normPath(ev.path));
+        if (!evs.length) return;
+        if (promptPhase === "idle") {
+          const minAt = Math.min(...evs.map((ev) => ev.at || Date.now()));
+          beginPrompt(minAt);
         }
+        const replay = promptPhase === "frozen";
+        for (const ev of evs) ingestEvent(ev, { replay });
+        if (replay && evs.length) {
+          const maxAt = Math.max(...evs.map((ev) => ev.at || Date.now()));
+          if (promptEndAt == null || maxAt > promptEndAt) {
+            promptEndAt = maxAt;
+          }
+        }
+        render();
         return;
       }
 
       if (data.type === "session_reset") {
+        notifyParentSessionReset(data.resetSeq);
         beginPrompt(data.at ?? Date.now());
+        return;
+      }
+
+      if (data.type === "monitor_settings") {
+        if (typeof data.horizonTimelineScale === "number") {
+          timelineScale = data.horizonTimelineScale;
+          const slider = document.getElementById("horizon-timeline-scale");
+          if (slider) slider.value = String(timelineScale);
+          render();
+        }
         return;
       }
 
       if (data.type === "status") {
         if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
         if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
-        if (data.status === "session_idle") {
+        if (data.status === "session_idle" && promptPhase === "running") {
+          try {
+            window.parent?.postMessage(
+              {
+                source: "AICodeEditorMonitor",
+                type: "prompt-complete",
+                payload: { summary: data.summary ?? null },
+              },
+              "*"
+            );
+          } catch {}
           endPrompt(data.at ?? Date.now());
         }
       }
     }
 
-    initLegend();
+    initLegend(document.getElementById("action-legend"), {
+      colors: ACTION_COLORS,
+      fontPx: Math.round(10 * SCALE),
+      swatchPx: Math.round(8 * SCALE),
+    });
     updatePromptStatus();
+    attachZoomControls(document.getElementById("horizon-zoom-toolbar"), zoomHost, {
+      hint: "Scroll/zoom · click folders to collapse",
+    });
+    initPreview();
+
+    const timelineSlider = document.getElementById("horizon-timeline-scale");
+
+    async function loadMonitorSettings() {
+      try {
+        const res = await fetch("/api/settings");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (typeof data.horizonTimelineScale === "number") {
+          timelineScale = data.horizonTimelineScale;
+          if (timelineSlider) timelineSlider.value = String(timelineScale);
+        }
+      } catch {}
+    }
+
+    function scheduleSaveTimelineScale() {
+      clearTimeout(saveTimelineTimer);
+      saveTimelineTimer = setTimeout(async () => {
+        try {
+          await fetch("/api/settings", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ horizonTimelineScale: timelineScale }),
+          });
+        } catch {}
+      }, 400);
+    }
+
+    timelineSlider?.addEventListener("input", () => {
+      timelineScale = parseFloat(timelineSlider.value) || 1;
+      render();
+      scheduleSaveTimelineScale();
+    });
 
     const ws = new WebSocket(`ws://${location.hostname}:8765`);
     ws.onopen = () => setBadge("status-browser", "Browser: connected", "ok");
@@ -435,7 +760,13 @@
     }, 1000);
 
     window.addEventListener("resize", () => render());
-    render();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        horizonNeedsFrame = true;
+        render();
+      }
+    });
+    loadMonitorSettings().then(() => render());
   </script>
 </body>
 </html>

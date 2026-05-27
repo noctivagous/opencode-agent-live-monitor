@@ -391,25 +391,6 @@ function isIdleStatusText(raw) {
   return /\b(idle|complete|completed|finished|done)\b/i.test(t);
 }
 
-function isMessageFinished(input, output) {
-  const bag = output ?? input ?? {};
-  const msg = bag.message ?? bag;
-  const status = (msg.status ?? msg.state ?? bag.status ?? output?.status ?? "")
-    .toString()
-    .toLowerCase();
-  if (["completed", "complete", "done", "idle", "finished"].includes(status)) {
-    return true;
-  }
-  const parts = msg.parts ?? bag.parts;
-  if (!Array.isArray(parts) || parts.length === 0) return false;
-  return parts.every((p) => {
-    if (typeof p === "string") return true;
-    if (p?.partial === true || p?.streaming === true) return false;
-    if (p?.done === false) return false;
-    return true;
-  });
-}
-
 function extractPaths(root, input, output) {
   const paths = [];
   const primary = pickFilePath(input, output);
@@ -546,15 +527,12 @@ export default async function liveMonitorPlugin(ctx) {
   const forwardSessionStatus = async (input, output) => {
     if (agentPhase === "idle") return;
     const raw = extractStatusMessage(input, output);
-    if (!raw) return;
-    if (isIdleStatusText(raw)) {
-      await markPromptComplete(raw);
-      return;
-    }
+    if (!raw || isIdleStatusText(raw)) return;
     await sendAgentStatus("working", formatStatusMessage(raw));
   };
 
   let lastCompleteAt = 0;
+  /** End-of-run only: OpenCode `session.idle` (agent loop finished), not per-message or status text. */
   const markPromptComplete = async (summaryText) => {
     const now = Date.now();
     if (agentPhase === "idle" && now - lastCompleteAt < 400) return;
@@ -670,9 +648,6 @@ export default async function liveMonitorPlugin(ctx) {
       if (role === "assistant") {
         const text = extractPromptText(input, output);
         if (text) lastAssistantSummary = truncatePrompt(text, 480);
-        if (text && isMessageFinished(input, output)) {
-          await markPromptComplete(text);
-        }
         return;
       }
       await forwardSessionStatus(input, output);
@@ -681,11 +656,7 @@ export default async function liveMonitorPlugin(ctx) {
     "message.part.updated": async (input, output) => {
       if (extractMessageRole(input, output) !== "assistant") return;
       const text = extractPromptText(input, output);
-      if (!text) return;
-      lastAssistantSummary = truncatePrompt(text, 480);
-      if (isMessageFinished(input, output)) {
-        await markPromptComplete(text);
-      }
+      if (text) lastAssistantSummary = truncatePrompt(text, 480);
     },
 
     "tui.prompt.append": async (input, output) => {
@@ -694,11 +665,6 @@ export default async function liveMonitorPlugin(ctx) {
     },
 
     "session.status": async (input, output) => {
-      const raw = extractStatusMessage(input, output);
-      if (raw && isIdleStatusText(raw)) {
-        await markPromptComplete(raw);
-        return;
-      }
       await forwardSessionStatus(input, output);
     },
 
@@ -784,13 +750,9 @@ export default async function liveMonitorPlugin(ctx) {
     },
 
     "session.updated": async (input, output) => {
-      const raw = extractStatusMessage(input, output);
-      if (raw && isIdleStatusText(raw)) {
-        await markPromptComplete(raw);
-        return;
-      }
       await forwardSessionStatus(input, output);
-      if (raw) {
+      const raw = extractStatusMessage(input, output);
+      if (raw && !isIdleStatusText(raw)) {
         await push({
           log: `<span class="text-slate-400">${formatStatusMessage(raw)}</span>`,
         });
@@ -808,14 +770,8 @@ export default async function liveMonitorPlugin(ctx) {
           event.data?.status ??
           event.data?.message ??
           (typeof event.data === "string" ? event.data : null);
-        if (typeof raw === "string" && raw.trim()) {
-          if (isIdleStatusText(raw)) {
-            await markPromptComplete(raw);
-            return;
-          }
-          if (agentPhase !== "idle") {
-            await sendAgentStatus("working", formatStatusMessage(raw));
-          }
+        if (typeof raw === "string" && raw.trim() && !isIdleStatusText(raw) && agentPhase !== "idle") {
+          await sendAgentStatus("working", formatStatusMessage(raw));
         }
       }
     },

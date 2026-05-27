@@ -4,9 +4,20 @@
   <meta charset="UTF-8">
   <title>Agent Monitor — Radial</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/monitor-chrome.css" />
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="/monitor-tree.js"></script>
   <script src="/monitor-highlights.js"></script>
+  <script src="/monitor-zoom.js"></script>
+  <script src="/monitor-legend.js"></script>
+  <script src="/monitor-preview.js"></script>
+  <script src="/monitor-badges.js"></script>
   <style>
     html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
@@ -14,25 +25,47 @@
     .node circle { cursor: pointer; }
     .node text { font-size: 9px; font-family: ui-monospace, monospace; pointer-events: none; }
     .node .active-ring { fill: none; pointer-events: none; }
+    #radial-chart {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+      cursor: grab;
+    }
+    #radial-chart:active { cursor: grabbing; }
+    #radial-chart-inner svg { display: block; }
   </style>
 </head>
 <body class="text-zinc-200">
-  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-2 text-sm flex flex-wrap items-center gap-3">
-    <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
-    <span class="font-semibold">Radial Cluster</span>
-    <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Browser…</span>
-    <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Plugin…</span>
+  <header class="monitor-toolbar">
+    <a href="/" class="toolbar-link text-zinc-500 hover:text-zinc-300 text-xs">
+      <i class="fa-solid fa-table-columns fa-icon-sm" aria-hidden="true"></i>
+      Dashboard
+    </a>
+    <span class="view-title">
+      <i class="fa-solid fa-circle-nodes fa-icon" aria-hidden="true"></i>
+      Radial
+    </span>
+    <span id="status-browser" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Browser…</span>
+    <span id="status-plugin" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Plugin…</span>
     <span id="project-root-label" class="text-xs text-zinc-500 font-mono truncate max-w-md" title="">—</span>
-    <span class="ml-auto text-xs text-zinc-600">Full index on connect · click folder to collapse</span>
+    <span class="ml-auto flex flex-wrap items-center gap-2">
+      <span id="action-legend"></span>
+      <span id="radial-zoom-toolbar"></span>
+    </span>
   </header>
-  <div id="radial-chart" class="flex-1 min-h-0 overflow-hidden flex items-center justify-center"></div>
+  <div id="radial-chart"><div id="radial-chart-inner"></div></div>
 
   <script>
+    const { setBadge } = MonitorBadges;
     const { cloneTree, createTreeApi } = MonitorTree;
     const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
+    const { createZoomHost, attachZoomControls } = MonitorZoom;
+    const { initLegend } = MonitorLegend;
+    const { init: initPreview, open: openPreview } = MonitorPreview;
     const userCollapsed = new Set();
     const treeApi = createTreeApi(userCollapsed);
     const highlights = createHighlightStore();
+    const zoomHost = createZoomHost({ scaleExtent: [0.15, 3] });
 
     let treeState = null;
     let indexSnapshot = null;
@@ -40,22 +73,33 @@
     let monitorResetSeq = 0;
     let focusPath = null;
     let inProgressPath = null;
+    let frameToActive = false;
 
     const ICON_DIR = "\u{1F4C1}";
     const ICON_FILE = "\u{1F4C4}";
+    const WAITING_INDEX_MSG = "Waiting for project index from OpenCode plugin…";
+
+    function notifyProjectInfo(data) {
+      notifyParent("project-info", {
+        projectRoot: data?.projectRoot || "",
+        projectLabel: data?.projectLabel || data?.tree?.name || "",
+      });
+    }
+
     const UNTOUCHED = "#52525b";
     const VISITED_MUTED = "#71717a";
 
-    function setBadge(id, text, tone) {
-      const tones = {
-        ok: "bg-emerald-950 text-emerald-300",
-        warn: "bg-amber-950 text-amber-300",
-        bad: "bg-red-950 text-red-300",
-        idle: "bg-zinc-800 text-zinc-400",
-      };
-      const el = document.getElementById(id);
-      el.textContent = text;
-      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    function notifyParent(type, payload = {}) {
+      try {
+        window.parent?.postMessage(
+          {
+            source: "AICodeEditorMonitor",
+            type,
+            payload,
+          },
+          "*"
+        );
+      } catch {}
     }
 
     function nodeActiveAction(data) {
@@ -75,13 +119,53 @@
       return VISITED_MUTED;
     }
 
-    function renderRadial(rootNode) {
-      if (!rootNode) return;
-      const el = document.getElementById("radial-chart");
-      el.innerHTML = "";
+    function frameRadial(radius, width, height, container) {
+      const pad = 48;
+      const cx = width / 2;
+      const cy = height / 2;
+      zoomHost.fitToContent(
+        {
+          x0: cx - radius - pad,
+          y0: cy - radius - pad,
+          x1: cx + radius + pad,
+          y1: cy + radius + pad,
+        },
+        container.clientWidth || width,
+        container.clientHeight || height
+      );
+    }
 
-      const width = el.clientWidth || 600;
-      const height = el.clientHeight || 600;
+    function renderRadial(rootNode, opts = {}) {
+      const container = document.getElementById("radial-chart");
+      const inner = document.getElementById("radial-chart-inner");
+      const preserveZoom =
+        !!rootNode && opts.preserveZoom !== false && !opts.frameActive && !frameToActive;
+
+      if (preserveZoom) {
+        const existing = inner.querySelector("svg");
+        if (existing) zoomHost.setTransform(d3.zoomTransform(existing));
+      }
+
+      inner.innerHTML = "";
+
+      const width = container.clientWidth || 600;
+      const height = container.clientHeight || 600;
+
+      if (!rootNode) {
+        d3.select(inner)
+          .append("svg")
+          .attr("width", width)
+          .attr("height", height)
+          .append("text")
+          .attr("x", width / 2)
+          .attr("y", height / 2)
+          .attr("text-anchor", "middle")
+          .attr("fill", "#71717a")
+          .attr("font-size", 13)
+          .text(WAITING_INDEX_MSG);
+        return;
+      }
+
       const radius = Math.min(width, height) / 2 - 40;
 
       const hierarchyFn = hasFullIndex
@@ -93,13 +177,13 @@
       )(root);
 
       const svg = d3
-        .select("#radial-chart")
+        .select("#radial-chart-inner")
         .append("svg")
         .attr("width", width)
-        .attr("height", height)
-        .attr("viewBox", [-width / 2, -height / 2, width, height]);
+        .attr("height", height);
 
-      const g = svg.append("g");
+      const zoomLayer = svg.append("g").attr("class", "zoom-layer");
+      const g = zoomLayer.append("g").attr("transform", `translate(${width / 2},${height / 2})`);
 
       g.append("g")
         .selectAll("path")
@@ -122,7 +206,19 @@
         .attr(
           "transform",
           (d) => `rotate(${(d.x * 180) / Math.PI - 90}) translate(${d.y},0)`
-        );
+        )
+        .style("cursor", "pointer")
+        .on("click", (event, d) => {
+          event.stopPropagation();
+          if (d.data.type === "dir") {
+            const key = d.data.path;
+            if (userCollapsed.has(key)) userCollapsed.delete(key);
+            else userCollapsed.add(key);
+            renderRadial(treeState, { preserveZoom: true, frameActive: false });
+          } else if (d.data.path) {
+            openPreview(d.data.path, d.data.name);
+          }
+        });
 
       node.each(function (d) {
         const sel = d3.select(this);
@@ -148,17 +244,7 @@
           .attr("r", (d) => (d.children ? 4 : 3))
           .attr("fill", nodeFill)
           .attr("stroke", strokeColor || "#09090b")
-          .attr("stroke-width", strokeColor ? 1.5 : 0.5)
-          .style("cursor", (d) => (d.data.type === "dir" ? "pointer" : "default"))
-          .on("click", (event, d) => {
-            event.stopPropagation();
-            if (d.data.type === "dir") {
-              const key = d.data.path;
-              if (userCollapsed.has(key)) userCollapsed.delete(key);
-              else userCollapsed.add(key);
-              renderRadial(treeState);
-            }
-          });
+          .attr("stroke-width", strokeColor ? 1.5 : 0.5);
 
         const icon = isDir ? ICON_DIR : ICON_FILE;
         const chevron = isDir ? (d.children ? "\u25BE " : "\u25B8 ") : "";
@@ -187,6 +273,26 @@
           .attr("font-family", "ui-monospace, monospace")
           .text(isDir ? chevron + name : name);
       });
+
+      g.selectAll(".link")
+        .attr("opacity", 0)
+        .transition()
+        .duration(180)
+        .attr("opacity", 1);
+      node
+        .attr("opacity", 0)
+        .transition()
+        .duration(180)
+        .attr("opacity", 1);
+
+      zoomHost.bind(svg, zoomLayer, container);
+
+      if (opts.frameActive || frameToActive) {
+        frameRadial(radius, width, height, container);
+        frameToActive = false;
+      } else if (preserveZoom) {
+        svg.call(zoomHost.getBehavior().transform, zoomHost.getTransform());
+      }
     }
 
     function syncHighlightsFromPayload(data) {
@@ -218,6 +324,7 @@
         focusPath = null;
         inProgressPath = null;
         highlights.clear();
+        notifyParent("session-reset", { resetSeq: data.resetSeq });
         if (data.tree) treeState = cloneTree(data.tree);
         else if (indexSnapshot) treeState = cloneTree(indexSnapshot);
         hasFullIndex = !!indexSnapshot;
@@ -230,7 +337,9 @@
         treeState = cloneTree(data.tree);
         hasFullIndex = true;
         highlights.clear();
-        renderRadial(treeState);
+        frameToActive = true;
+        notifyProjectInfo(data);
+        renderRadial(treeState, { frameActive: true, preserveZoom: false });
         return;
       }
 
@@ -238,6 +347,7 @@
         const el = document.getElementById("project-root-label");
         el.textContent = data.projectRoot || data.projectLabel;
         el.title = data.projectRoot || "";
+        notifyProjectInfo(data);
       }
 
       if (data.activeFiles?.length) {
@@ -271,6 +381,11 @@
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === "status") {
+        if (data.status === "session_idle") {
+          notifyParent("prompt-complete", {
+            summary: data.summary ?? null,
+          });
+        }
         if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
         if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
         return;
@@ -278,11 +393,19 @@
       applyPayload(data);
     };
 
+    initLegend(document.getElementById("action-legend"));
+    attachZoomControls(document.getElementById("radial-zoom-toolbar"), zoomHost, {
+      hint: "Scroll/zoom · click folders to collapse",
+    });
+    initPreview();
+
+    renderRadial(null);
+
     let resizeTimer;
     new ResizeObserver(() => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        if (treeState) renderRadial(treeState);
+        renderRadial(treeState, { preserveZoom: true, frameActive: false });
       }, 80);
     }).observe(document.getElementById("radial-chart"));
   </script>

@@ -20,6 +20,11 @@
     "index-horizon.html",
     "monitor-tree.js",
     "monitor-highlights.js",
+    "monitor-zoom.js",
+    "monitor-preview.js",
+    "monitor-badges.js",
+    "monitor-legend.js",
+    "monitor-chrome.css",
     "README.md"
   ],
   "scripts": {

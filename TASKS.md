@@ -1,0 +1,1 @@
+on all four charts, the currently selected

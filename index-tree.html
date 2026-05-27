@@ -4,9 +4,20 @@
   <meta charset="UTF-8">
   <title>Agent Monitor — Tree</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/monitor-chrome.css" />
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="/monitor-tree.js"></script>
   <script src="/monitor-highlights.js"></script>
+  <script src="/monitor-zoom.js"></script>
+  <script src="/monitor-legend.js"></script>
+  <script src="/monitor-preview.js"></script>
+  <script src="/monitor-badges.js"></script>
   <style>
     html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
@@ -27,22 +38,36 @@
   </style>
 </head>
 <body class="text-zinc-200">
-  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-2 text-sm flex flex-wrap items-center gap-3">
-    <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
-    <span class="font-semibold">Project Tree</span>
-    <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Browser…</span>
-    <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Plugin…</span>
+  <header class="monitor-toolbar">
+    <a href="/" class="toolbar-link text-zinc-500 hover:text-zinc-300 text-xs">
+      <i class="fa-solid fa-table-columns fa-icon-sm" aria-hidden="true"></i>
+      Dashboard
+    </a>
+    <span class="view-title">
+      <i class="fa-solid fa-sitemap fa-icon" aria-hidden="true"></i>
+      Tree
+    </span>
+    <span id="status-browser" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Browser…</span>
+    <span id="status-plugin" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Plugin…</span>
     <span id="project-root-label" class="text-xs text-zinc-500 font-mono truncate max-w-md" title="">—</span>
-    <span class="ml-auto text-xs text-zinc-600">Scroll/zoom · click folders to collapse</span>
+    <span class="ml-auto flex flex-wrap items-center gap-2">
+      <span id="action-legend"></span>
+      <span id="tree-zoom-toolbar"></span>
+    </span>
   </header>
   <div id="tree-chart"><div id="tree-chart-inner"></div></div>
 
   <script>
+    const { setBadge } = MonitorBadges;
     const { cloneTree, createTreeApi } = MonitorTree;
     const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
+    const { createZoomHost, attachZoomControls } = MonitorZoom;
+    const { initLegend } = MonitorLegend;
+    const { init: initPreview, open: openPreview } = MonitorPreview;
     const userCollapsed = new Set();
     const treeApi = createTreeApi(userCollapsed);
     const highlights = createHighlightStore();
+    const zoomHost = createZoomHost({ scaleExtent: [0.15, 3] });
 
     let treeState = null;
     let indexSnapshot = null;
@@ -51,21 +76,30 @@
     let focusPath = null;
     let inProgressPath = null;
     let frameToActive = false;
-    let zoomBehavior = null;
+    let hasInitialFramed = false;
 
     const ICON_DIR = "\u{1F4C1}";
     const ICON_FILE = "\u{1F4C4}";
+    const WAITING_INDEX_MSG = "Waiting for project index from OpenCode plugin…";
 
-    function setBadge(id, text, tone) {
-      const tones = {
-        ok: "bg-emerald-950 text-emerald-300",
-        warn: "bg-amber-950 text-amber-300",
-        bad: "bg-red-950 text-red-300",
-        idle: "bg-zinc-800 text-zinc-400",
-      };
-      const el = document.getElementById(id);
-      el.textContent = text;
-      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    function notifyProjectInfo(data) {
+      notifyParent("project-info", {
+        projectRoot: data?.projectRoot || "",
+        projectLabel: data?.projectLabel || data?.tree?.name || "",
+      });
+    }
+
+    function notifyParent(type, payload = {}) {
+      try {
+        window.parent?.postMessage(
+          {
+            source: "AICodeEditorMonitor",
+            type,
+            payload,
+          },
+          "*"
+        );
+      } catch {}
     }
 
     function nodeActiveAction(data) {
@@ -89,36 +123,56 @@
         .attr("rx", capH / 2);
     }
 
-    function frameActiveNodes(svg, descendants, container) {
-      const targets = descendants.filter((d) => nodeActiveAction(d.data) || d.data.isFocus);
-      if (!targets.length || !zoomBehavior) return;
+    function frameActiveNodes(descendants, container) {
+      let targets = descendants.filter((d) => nodeActiveAction(d.data) || d.data.isFocus);
+      if (!targets.length) targets = descendants;
+      if (!targets.length || !zoomHost.getBehavior()) return;
 
       const padX = 80;
       const padY = 40;
-      const minX = d3.min(targets, (d) => d.y) + 16 - padX;
-      const maxX = d3.max(targets, (d) => d.y) + 16 + padX + 100;
-      const minY = d3.min(targets, (d) => d.x) + 16 - padY;
-      const maxY = d3.max(targets, (d) => d.x) + 16 + padY;
-
-      const cw = container.clientWidth || 400;
-      const ch = container.clientHeight || 400;
-      const dx = Math.max(maxX - minX, 80);
-      const dy = Math.max(maxY - minY, 60);
-      const scale = Math.min(2.5, Math.max(0.2, 0.88 / Math.max(dx / cw, dy / ch)));
-      const tx = cw / 2 - scale * ((minX + maxX) / 2);
-      const ty = ch / 2 - scale * ((minY + maxY) / 2);
-
-      svg
-        .transition()
-        .duration(450)
-        .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+      const ox = 16;
+      const oy = 16;
+      zoomHost.fitToContent(
+        {
+          x0: d3.min(targets, (d) => d.y) + ox - padX,
+          x1: d3.max(targets, (d) => d.y) + ox + padX + 100,
+          y0: d3.min(targets, (d) => d.x) + oy - padY,
+          y1: d3.max(targets, (d) => d.x) + oy + padY,
+        },
+        container.clientWidth || 400,
+        container.clientHeight || 400
+      );
     }
 
-    function renderTree(rootNode) {
-      if (!rootNode) return;
+    function renderTree(rootNode, opts = {}) {
       const container = document.getElementById("tree-chart");
       const inner = document.getElementById("tree-chart-inner");
+      const preserveZoom =
+        !!rootNode && opts.preserveZoom !== false && !opts.frameActive && !frameToActive;
+
+      if (preserveZoom) {
+        const existing = inner.querySelector("svg");
+        if (existing) zoomHost.setTransform(d3.zoomTransform(existing));
+      }
+
       inner.innerHTML = "";
+
+      if (!rootNode) {
+        const cw = Math.max(320, container.clientWidth || 320);
+        const ch = Math.max(200, container.clientHeight || 200);
+        d3.select(inner)
+          .append("svg")
+          .attr("width", cw)
+          .attr("height", ch)
+          .append("text")
+          .attr("x", cw / 2)
+          .attr("y", ch / 2)
+          .attr("text-anchor", "middle")
+          .attr("fill", "#71717a")
+          .attr("font-size", 13)
+          .text(WAITING_INDEX_MSG);
+        return;
+      }
 
       const hierarchyFn = hasFullIndex
         ? (n) => treeApi.toHierarchyIndexed(n, focusPath)
@@ -153,13 +207,17 @@
         .attr("class", "node")
         .attr("transform", (d) => `translate(${d.y},${d.x})`)
         .on("click", (event, d) => {
+          event.stopPropagation();
           if (d.data.type === "dir") {
             const key = d.data.path;
             if (userCollapsed.has(key)) userCollapsed.delete(key);
             else userCollapsed.add(key);
-            renderTree(treeState);
+            renderTree(treeState, { preserveZoom: true, frameActive: false });
+          } else if (d.data.path) {
+            openPreview(d.data.path, d.data.name);
           }
-        });
+        })
+        .style("cursor", (d) => (d.data.type === "dir" ? "pointer" : "text"));
 
       node.each(function (d) {
         const sel = d3.select(this);
@@ -228,17 +286,25 @@
         }
       });
 
-      zoomBehavior = d3
-        .zoom()
-        .scaleExtent([0.15, 3])
-        .on("zoom", (event) => {
-          zoomLayer.attr("transform", event.transform);
-        });
-      svg.call(zoomBehavior);
+      g.selectAll(".link")
+        .attr("opacity", 0)
+        .transition()
+        .duration(180)
+        .attr("opacity", 1);
+      node
+        .attr("opacity", 0)
+        .transition()
+        .duration(180)
+        .attr("opacity", 1);
 
-      if (frameToActive) {
-        frameActiveNodes(svg, descendants, container);
+      zoomHost.bind(svg, zoomLayer, container);
+
+      if (opts.frameActive || frameToActive) {
+        frameActiveNodes(descendants, container);
         frameToActive = false;
+        hasInitialFramed = true;
+      } else if (preserveZoom) {
+        svg.call(zoomHost.getBehavior().transform, zoomHost.getTransform());
       }
     }
 
@@ -273,6 +339,7 @@
         focusPath = null;
         inProgressPath = null;
         highlights.clear();
+        notifyParent("session-reset", { resetSeq: data.resetSeq });
         if (data.tree) treeState = cloneTree(data.tree);
         else if (indexSnapshot) treeState = cloneTree(indexSnapshot);
         hasFullIndex = !!indexSnapshot;
@@ -286,8 +353,9 @@
         treeState = cloneTree(data.tree);
         hasFullIndex = true;
         highlights.clear();
-        frameToActive = false;
-        renderTree(treeState);
+        frameToActive = true;
+        notifyProjectInfo(data);
+        renderTree(treeState, { frameActive: true, preserveZoom: false });
         return;
       }
 
@@ -295,6 +363,7 @@
         const el = document.getElementById("project-root-label");
         el.textContent = data.projectRoot || data.projectLabel;
         el.title = data.projectRoot || "";
+        notifyProjectInfo(data);
       }
 
       if (data.activeFiles?.length) {
@@ -318,9 +387,10 @@
         frameToActive = true;
         renderTree(treeState);
       } else if (data.tree) {
+        if (!hasInitialFramed) frameToActive = true;
         treeState = cloneTree(data.tree);
         syncHighlightsFromPayload(data);
-        renderTree(treeState);
+        renderTree(treeState, { frameActive: frameToActive, preserveZoom: !frameToActive });
       }
     }
 
@@ -331,6 +401,11 @@
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === "status") {
+        if (data.status === "session_idle") {
+          notifyParent("prompt-complete", {
+            summary: data.summary ?? null,
+          });
+        }
         if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
         if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
         return;
@@ -338,11 +413,19 @@
       applyPayload(data);
     };
 
+    initLegend(document.getElementById("action-legend"));
+    attachZoomControls(document.getElementById("tree-zoom-toolbar"), zoomHost, {
+      hint: "Scroll/zoom · click folders to collapse",
+    });
+    initPreview();
+
+    renderTree(null);
+
     let resizeTimer;
     new ResizeObserver(() => {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        if (treeState) renderTree(treeState);
+        renderTree(treeState, { preserveZoom: true, frameActive: false });
       }, 80);
     }).observe(document.getElementById("tree-chart"));
   </script>

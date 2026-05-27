@@ -4,6 +4,12 @@
   <meta charset="UTF-8">
   <title>Agent Live Monitor</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  />
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
@@ -22,6 +28,9 @@
       padding: 7px 14px;
       font-size: 0.8125rem;
       font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
       color: #a1a1aa;
       background: #27272a;
       border: 1px solid #52525b;
@@ -33,6 +42,11 @@
     .tab-btn:hover {
       color: #e4e4e7;
       background: #3f3f46;
+    }
+    .tab-btn .fa-tab-icon {
+      font-size: 0.75rem;
+      width: 1em;
+      opacity: 0.9;
     }
     .tab-btn.active {
       z-index: 1;
@@ -65,20 +79,64 @@
 </head>
 <body class="text-zinc-200">
   <header class="flex-shrink-0 bg-zinc-950">
-    <div class="flex items-center gap-3 px-3 pt-2 pb-0">
-      <span class="text-sm font-semibold text-zinc-300 shrink-0">Agent Live Monitor</span>
+    <div class="flex items-center gap-3 px-3 pt-2 pb-0 min-h-[2rem]">
+      <span class="text-sm font-semibold text-zinc-300 shrink-0 inline-flex items-center gap-2">
+        <i class="fa-solid fa-gauge-high fa-icon" aria-hidden="true"></i>
+        Agent Live Monitor
+      </span>
+      <span
+        id="dashboard-project"
+        class="text-sm text-zinc-500 font-mono truncate max-w-xl hidden"
+        title=""
+      ></span>
     </div>
     <nav id="tabs" class="tab-bar" role="tablist" aria-label="Monitor views"></nav>
   </header>
   <main id="tab-panels" class="flex-1 min-h-0"></main>
 
+  <div
+    id="done-popover"
+    class="fixed top-14 right-4 w-[420px] max-w-[calc(100vw-2rem)] hidden z-50 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl shadow-black/70 overflow-hidden"
+    role="dialog"
+    aria-modal="false"
+    aria-label="Prompt complete"
+  >
+    <div class="flex items-center justify-between px-3 py-2 border-b border-zinc-800 bg-zinc-900/90">
+      <div class="text-sm font-semibold text-sky-300 truncate pr-3 inline-flex items-center gap-2">
+        <i class="fa-solid fa-circle-check fa-icon" aria-hidden="true"></i>
+        Prompt complete
+      </div>
+      <button
+        id="done-popover-ok"
+        type="button"
+        class="rounded-md px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 inline-flex items-center gap-1.5"
+      >
+        <i class="fa-solid fa-check fa-icon-sm" aria-hidden="true"></i>
+        OK
+      </button>
+    </div>
+    <div class="px-3 py-3 text-xs text-zinc-200 max-h-[60vh] overflow-auto">
+      <div id="done-popover-message" class="whitespace-pre-wrap"></div>
+      <div
+        id="done-popover-prompt"
+        class="mt-2 text-[11px] text-zinc-500 font-mono whitespace-pre-wrap hidden"
+      ></div>
+    </div>
+  </div>
+
   <script>
     const TABS = [
-      { id: "explorer", label: "Explorer", src: "/explorer", default: true },
-      { id: "tree", label: "Tree", src: "/tree" },
-      { id: "treemap", label: "Treemap", src: "/treemap" },
-      { id: "radial", label: "Radial", src: "/radial" },
-      { id: "horizon", label: "Horizon", src: "/horizon" },
+      {
+        id: "explorer",
+        label: "Activity",
+        icon: "fa-solid fa-list-check",
+        src: "/explorer",
+        default: true,
+      },
+      { id: "tree", label: "Tree", icon: "fa-solid fa-sitemap", src: "/tree" },
+      { id: "treemap", label: "Treemap", icon: "fa-solid fa-table-cells", src: "/treemap" },
+      { id: "radial", label: "Radial", icon: "fa-solid fa-circle-nodes", src: "/radial" },
+      { id: "horizon", label: "Horizon", icon: "fa-solid fa-chart-area", src: "/horizon" },
     ];
 
     const nav = document.getElementById("tabs");
@@ -104,7 +162,7 @@
       btn.type = "button";
       btn.id = `tab-${tab.id}`;
       btn.className = "tab-btn" + (tab.default ? " active" : "");
-      btn.textContent = tab.label;
+      btn.innerHTML = `<i class="${tab.icon} fa-tab-icon" aria-hidden="true"></i><span>${tab.label}</span>`;
       btn.setAttribute("role", "tab");
       btn.setAttribute("aria-selected", tab.default ? "true" : "false");
       btn.addEventListener("click", () => activateTab(tab.id));
@@ -125,6 +183,93 @@
       if (saved && TABS.some((t) => t.id === saved)) initial = saved;
     } catch {}
     activateTab(initial);
+
+    const donePopover = document.getElementById("done-popover");
+    const doneOk = document.getElementById("done-popover-ok");
+    const doneMessageEl = document.getElementById("done-popover-message");
+    const donePromptEl = document.getElementById("done-popover-prompt");
+
+    function hideDonePopover() {
+      donePopover.classList.add("hidden");
+      doneMessageEl.textContent = "";
+      donePromptEl.classList.add("hidden");
+      donePromptEl.textContent = "";
+    }
+
+    function showDonePopover(payload = {}) {
+      const summary = payload.summary || "";
+      const message = payload.message || (summary ? `Done — ${summary}` : "Prompt complete");
+      doneMessageEl.textContent = message;
+
+      if (payload.prompt) {
+        donePromptEl.textContent = payload.prompt;
+        donePromptEl.classList.remove("hidden");
+      } else {
+        donePromptEl.classList.add("hidden");
+        donePromptEl.textContent = "";
+      }
+
+      donePopover.classList.remove("hidden");
+    }
+
+    doneOk?.addEventListener("click", hideDonePopover);
+
+    const dashboardProjectEl = document.getElementById("dashboard-project");
+
+    function setDashboardProject(payload = {}) {
+      if (!dashboardProjectEl) return;
+      const root = payload.projectRoot || "";
+      const label = payload.projectLabel || root || "";
+      if (!label) {
+        dashboardProjectEl.classList.add("hidden");
+        dashboardProjectEl.textContent = "";
+        dashboardProjectEl.title = "";
+        return;
+      }
+      dashboardProjectEl.innerHTML = `<i class="fa-solid fa-folder-open fa-icon-sm" aria-hidden="true"></i> ${label}`;
+      dashboardProjectEl.title = root || label;
+      dashboardProjectEl.classList.remove("hidden");
+      dashboardProjectEl.classList.add("inline-flex", "items-center", "gap-2");
+    }
+
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.source !== "AICodeEditorMonitor") return;
+
+      if (data.type === "project-info") {
+        setDashboardProject(data.payload || {});
+        return;
+      }
+
+      if (data.type === "prompt-submitted" || data.type === "session-reset") {
+        hideDonePopover();
+        return;
+      }
+
+      if (data.type === "prompt-complete") {
+        showDonePopover(data.payload || {});
+      }
+    });
+
+    const dashWs = new WebSocket(`ws://${location.hostname}:8765`);
+    dashWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "project_index") {
+          setDashboardProject({
+            projectRoot: data.projectRoot,
+            projectLabel: data.projectLabel || data.tree?.name,
+          });
+        } else if (data.projectRoot || data.projectLabel) {
+          setDashboardProject({
+            projectRoot: data.projectRoot,
+            projectLabel: data.projectLabel,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    };
   </script>
 </body>
 </html>
