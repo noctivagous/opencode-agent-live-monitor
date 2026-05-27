@@ -472,6 +472,7 @@ export default async function liveMonitorPlugin(ctx) {
       : normalized;
     await sender.send({
       type: "activity_event",
+      resetSeq,
       path: normalized,
       dir,
       name,
@@ -517,6 +518,7 @@ export default async function liveMonitorPlugin(ctx) {
     }
     await sender.send({
       type: "file_progress",
+      resetSeq,
       path: normalized,
       active,
       tool,

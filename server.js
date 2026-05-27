@@ -114,7 +114,15 @@ function updateStateCache(data) {
     }
   }
   if (data.type === "update" && data.tree) stateCache.lastUpdate = data;
-  if (data.type === "agent_status") stateCache.agentStatus = data;
+  if (data.type === "agent_status") {
+    stateCache.agentStatus = data;
+    if (data.phase === "prompt_submitted") {
+      stateCache.activityEvents = [];
+      stateCache.lastUpdate = null;
+      stateCache.fileProgress = null;
+      if (data.resetSeq != null) stateCache.resetSeq = data.resetSeq;
+    }
+  }
   if (data.type === "file_progress") stateCache.fileProgress = data;
 }
 

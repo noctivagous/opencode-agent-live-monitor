@@ -71,6 +71,7 @@
       list: "#7c3aed",
       glob: "#9333ea",
       grep: "#a855f7",
+      write: "#6366f1",
       bash: "#ca8a04",
     };
     const UNTOUCHED_FILE = "#52525b";
@@ -170,6 +171,7 @@
 
     function applySessionReset(data) {
       if (!RESET_VISITED_ON_PROMPT) return;
+      if (data.resetSeq != null && data.resetSeq < resetSeq) return;
       if (data.resetSeq != null) resetSeq = data.resetSeq;
       flashes.clear();
       inProgressPath = null;
@@ -719,6 +721,8 @@
       }
 
       if (data.type === "file_progress") {
+        if (data.resetSeq != null && data.resetSeq < resetSeq) return;
+        if (data.resetSeq != null) resetSeq = Math.max(resetSeq, data.resetSeq);
         const p = normPath(data.path);
         if (data.active) inProgressPath = p;
         else if (p === normPath(inProgressPath)) inProgressPath = null;

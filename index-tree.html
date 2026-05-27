@@ -320,8 +320,28 @@
       if (data.tree) highlights.stampFromTree(data.tree);
     }
 
+    function applyNewPromptReset(data) {
+      if (data.resetSeq != null && data.resetSeq < monitorResetSeq) return;
+      if (data.resetSeq != null) monitorResetSeq = data.resetSeq;
+      focusPath = null;
+      inProgressPath = null;
+      highlights.clear();
+      if (data.tree) treeState = cloneTree(data.tree);
+      else if (indexSnapshot) treeState = cloneTree(indexSnapshot);
+      hasFullIndex = !!indexSnapshot;
+      frameToActive = false;
+      if (treeState) renderTree(treeState);
+    }
+
     function applyPayload(data) {
+      if (data.type === "agent_status" && data.phase === "prompt_submitted") {
+        applyNewPromptReset(data);
+        return;
+      }
+
       if (data.type === "file_progress") {
+        if (data.resetSeq != null && data.resetSeq < monitorResetSeq) return;
+        if (data.resetSeq != null) monitorResetSeq = Math.max(monitorResetSeq, data.resetSeq);
         const p = MonitorHighlights.normPath(data.path);
         if (data.active) inProgressPath = p;
         else if (p === inProgressPath) inProgressPath = null;
@@ -331,6 +351,8 @@
       }
 
       if (data.type === "activity_event") {
+        if (data.resetSeq != null && data.resetSeq < monitorResetSeq) return;
+        if (data.resetSeq != null) monitorResetSeq = Math.max(monitorResetSeq, data.resetSeq);
         highlights.stamp(data.path, data.action);
         frameToActive = true;
         if (treeState) renderTree(treeState);
@@ -338,16 +360,8 @@
       }
 
       if (data.type === "session_reset") {
-        if (data.resetSeq != null) monitorResetSeq = data.resetSeq;
-        focusPath = null;
-        inProgressPath = null;
-        highlights.clear();
         notifyParent("session-reset", { resetSeq: data.resetSeq });
-        if (data.tree) treeState = cloneTree(data.tree);
-        else if (indexSnapshot) treeState = cloneTree(indexSnapshot);
-        hasFullIndex = !!indexSnapshot;
-        frameToActive = false;
-        if (treeState) renderTree(treeState);
+        applyNewPromptReset(data);
         return;
       }
 

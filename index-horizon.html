@@ -23,28 +23,32 @@
       flex: 1;
       min-height: 0;
       overflow: hidden;
-      cursor: grab;
       position: relative;
+      cursor: default;
     }
-    #horizon-viewport:active { cursor: grabbing; }
     #horizon-chart-inner { width: 100%; height: 100%; }
-    #horizon-chart-inner svg { display: block; }
+    #horizon-chart-inner svg { display: block; max-width: 100%; }
+    #horizon-viewport.is-panning { cursor: grab; }
+    #horizon-viewport.is-panning:active { cursor: grabbing; }
+    .horizon-hscroll .track { cursor: pointer; }
+    .horizon-hscroll .thumb { cursor: grab; fill: #52525b; }
+    .horizon-hscroll .thumb:active { cursor: grabbing; fill: #71717a; }
     .dir-label { fill: #a78bfa; font-weight: 600; }
     .file-label { fill: #a1a1aa; }
     .file-row-hit { fill: transparent; cursor: pointer; }
     .file-row-hit:hover { fill: rgba(255, 255, 255, 0.04); }
-    .axis text { fill: #71717a; font-size: 12px; }
+    .axis text { fill: #71717a; font-size: 17px; }
     .axis line, .axis path { stroke: #3f3f46; }
     .prompt-marker { pointer-events: none; }
     .prompt-marker-label {
-      font-size: 9px;
+      font-size: 11px;
       font-family: ui-monospace, monospace;
       font-weight: 600;
       pointer-events: none;
     }
     .placeholder-dir { fill: #52525b; font-weight: 600; }
     .placeholder-file { fill: #3f3f46; }
-    .placeholder-hint { fill: #71717a; font-size: 11px; }
+    .placeholder-hint { fill: #71717a; font-size: 13px; }
   </style>
 </head>
 <body class="text-zinc-200">
@@ -86,10 +90,14 @@
 
   <script>
     const { setBadge } = MonitorBadges;
-    const SCALE = 1.2;
+    const SCALE = 1.44;
     const BUCKET_MS = 1000;
     const MAX_FILES = 80;
     const MIN_PROMPT_SPAN_MS = 8000;
+    const BASE_TIMELINE_PX = 1200;
+    const MIN_CHART_W = 400;
+    const SCROLLBAR_H = Math.round(12 * SCALE);
+    const CLIP_ID = "horizon-plot-clip";
     const GUTTER = Math.round(200 * SCALE);
     const ROW_H = Math.round(22 * SCALE);
     const DIR_ROW_H = Math.round(18 * SCALE);
@@ -123,9 +131,14 @@
     const { initLegend } = MonitorLegend;
     const { init: initPreview, open: openPreview } = MonitorPreview;
     const zoomHost = createZoomHost({ scaleExtent: [0.25, 3] });
-    let horizonNeedsFrame = true;
     let timelineScale = 1;
+    let horizonViewReady = false;
+    let monitorResetSeq = 0;
     let saveTimelineTimer = null;
+    let followLiveEdge = true;
+    let timelineScrollX = 0;
+    let currentLayout = null;
+    const SCROLL_EDGE_EPS = 8;
 
     /** idle | running | frozen */
     let promptPhase = "idle";
@@ -156,9 +169,177 @@
       }, INACTIVITY_FREEZE_MS + 50);
     }
 
-    function chartWidthForViewport(cw) {
-      const base = Math.max(400, cw - GUTTER - MARGIN_RIGHT);
-      return Math.max(400, base * timelineScale);
+    function chartTimelineWidth() {
+      return Math.max(MIN_CHART_W, Math.round(BASE_TIMELINE_PX * timelineScale));
+    }
+
+    function plotWidth(cw) {
+      return Math.max(1, cw - GUTTER - MARGIN_RIGHT);
+    }
+
+    function computeLayout(viewport, rows, t0, t1) {
+      const cw = viewport.clientWidth || 800;
+      const ch = viewport.clientHeight || 400;
+      const chartW = chartTimelineWidth();
+      const plotW = plotWidth(cw);
+      const scrollMax = Math.max(0, chartW - plotW);
+      timelineScrollX = Math.min(timelineScrollX, scrollMax);
+      const totalH =
+        MARGIN_TOP +
+        rows.reduce((s, r) => s + (r.type === "dir" ? DIR_ROW_H : ROW_H), 0) +
+        Math.round(16 * SCALE);
+      const chartBottom = Math.max(MARGIN_TOP + 40, totalH);
+      const svgH = Math.max(ch, chartBottom + SCROLLBAR_H + Math.round(10 * SCALE));
+      const x = d3.scaleTime().domain([t0, t1]).range([GUTTER, GUTTER + chartW]);
+      return {
+        cw,
+        ch,
+        chartW,
+        plotW,
+        scrollMax,
+        totalH,
+        chartBottom,
+        svgH,
+        x,
+        t0,
+        t1,
+      };
+    }
+
+    function applyTimelineScrollPan() {
+      d3.select("#horizon-chart-inner .horizon-scroll-pan").attr(
+        "transform",
+        `translate(${-timelineScrollX},0)`
+      );
+    }
+
+    function updateScrollbarThumb(layout) {
+      const sb = d3.select("#horizon-chart-inner .horizon-hscroll");
+      if (sb.empty() || !layout || layout.scrollMax <= 0) return;
+      const thumbW = Math.max(28, (layout.plotW * layout.plotW) / (layout.plotW + layout.scrollMax));
+      const travel = Math.max(1, layout.plotW - thumbW);
+      const thumbX = (timelineScrollX / layout.scrollMax) * travel;
+      sb.select(".thumb").attr("x", thumbX).attr("width", thumbW);
+    }
+
+    function setTimelineScroll(x, layout, { fromUser = false } = {}) {
+      if (!layout) return;
+      const max = layout.scrollMax;
+      timelineScrollX = Math.max(0, Math.min(max, x));
+      if (fromUser) followLiveEdge = timelineScrollX >= max - SCROLL_EDGE_EPS;
+      applyTimelineScrollPan();
+      updateScrollbarThumb(layout);
+    }
+
+    function stickToLiveEdge(layout) {
+      if (!followLiveEdge || !layout) return;
+      setTimelineScroll(layout.scrollMax, layout);
+    }
+
+    function drawInternalScrollbar(svg, layout) {
+      svg.selectAll(".horizon-hscroll").remove();
+      if (!layout || layout.scrollMax <= 0) return;
+
+      const y = Math.min(layout.svgH - SCROLLBAR_H - 4, layout.chartBottom + 6);
+      const sb = svg
+        .append("g")
+        .attr("class", "horizon-hscroll")
+        .attr("transform", `translate(${GUTTER},${y})`);
+
+      sb.append("rect")
+        .attr("class", "track")
+        .attr("width", layout.plotW)
+        .attr("height", SCROLLBAR_H)
+        .attr("rx", SCROLLBAR_H / 2)
+        .attr("fill", "#18181b")
+        .attr("stroke", "#27272a")
+        .on("click", (event) => {
+          const [mx] = d3.pointer(event, sb.select(".track").node());
+          const ratio = mx / layout.plotW;
+          setTimelineScroll(ratio * layout.scrollMax, layout, { fromUser: true });
+        });
+
+      const thumbW = Math.max(28, (layout.plotW * layout.plotW) / (layout.plotW + layout.scrollMax));
+      sb.append("rect")
+        .attr("class", "thumb")
+        .attr("y", 1)
+        .attr("height", SCROLLBAR_H - 2)
+        .attr("rx", (SCROLLBAR_H - 2) / 2)
+        .call(
+          d3
+            .drag()
+            .on("start", () => {
+              followLiveEdge = false;
+            })
+            .on("drag", (event) => {
+              const track = sb.select(".track").node();
+              const [mx] = d3.pointer(event, track);
+              const thumbWNow = parseFloat(sb.select(".thumb").attr("width")) || thumbW;
+              const travel = Math.max(1, layout.plotW - thumbWNow);
+              const ratio = Math.max(0, Math.min(1, (mx - thumbWNow / 2) / travel));
+              setTimelineScroll(ratio * layout.scrollMax, layout, { fromUser: true });
+            })
+        );
+
+      updateScrollbarThumb(layout);
+    }
+
+    function createHorizonSvg(viewport, inner, layout) {
+      inner.innerHTML = "";
+      inner.style.width = "";
+      const svg = d3
+        .select(inner)
+        .append("svg")
+        .attr("width", layout.cw)
+        .attr("height", layout.svgH);
+
+      svg.select(`#${CLIP_ID}`).remove();
+      svg
+        .append("defs")
+        .append("clipPath")
+        .attr("id", CLIP_ID)
+        .append("rect")
+        .attr("x", GUTTER)
+        .attr("y", 0)
+        .attr("width", layout.plotW)
+        .attr("height", layout.chartBottom);
+
+      const labelsG = svg.append("g").attr("class", "horizon-labels");
+      const plotG = svg.append("g").attr("clip-path", `url(#${CLIP_ID})`);
+      const scrollPan = plotG.append("g").attr("class", "horizon-scroll-pan");
+      const zoomG = scrollPan.append("g").attr("class", "horizon-timeline-scroll");
+      const g = zoomG.append("g");
+
+      return { svg, labelsG, g, zoomG, scrollPan };
+    }
+
+    /** Fixed SVG width; pan/zoom on clipped timeline only. */
+    function applyHorizonView(svg, zoomG, viewport, layout, savedTransform) {
+      const viewportEl = document.getElementById("horizon-viewport");
+      viewportEl?.classList.add("is-panning");
+      zoomHost.bind(svg, zoomG, viewport);
+      const behavior = zoomHost.getBehavior();
+      if (behavior) {
+        behavior.filter((event) => {
+          if (event.type === "wheel") {
+            const horizontal =
+              Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey;
+            if (horizontal) return false;
+          }
+          return (!event.ctrlKey && event.button === 0) || event.type === "wheel";
+        });
+      }
+      const t = savedTransform || zoomHost.getTransform();
+      const userZoomed = t.k !== 1 || Math.abs(t.x) > 0.5 || Math.abs(t.y) > 0.5;
+      if (!horizonViewReady || !userZoomed) {
+        zoomHost.resetTo100();
+        horizonViewReady = true;
+      } else {
+        svg.call(zoomHost.getBehavior().transform, t);
+      }
+      applyTimelineScrollPan();
+      drawInternalScrollbar(svg, layout);
+      requestAnimationFrame(() => stickToLiveEdge(layout));
     }
 
     function normPath(p) {
@@ -200,6 +381,15 @@
       el.className = "text-xs text-sky-400 inline-flex items-center gap-1.5 truncate max-w-[14rem]";
     }
 
+    function adoptResetSeq(seq) {
+      if (seq == null) return;
+      monitorResetSeq = Math.max(monitorResetSeq, seq);
+    }
+
+    function isStaleReset(seq) {
+      return seq != null && seq < monitorResetSeq;
+    }
+
     function beginPrompt(at) {
       events.length = 0;
       fileMeta.clear();
@@ -207,10 +397,16 @@
       promptEndAt = null;
       promptPhase = "running";
       lastActivityAt = null;
+      timelineScrollX = 0;
+      followLiveEdge = true;
       clearInactivityTimer();
-      horizonNeedsFrame = true;
       updatePromptStatus();
       render();
+    }
+
+    function resetForNewPrompt(data = {}) {
+      adoptResetSeq(data.resetSeq);
+      beginPrompt(data.at ?? Date.now());
     }
 
     function endPrompt(at) {
@@ -232,6 +428,9 @@
     }
 
     function ingestEvent(ev, { replay = false } = {}) {
+      if (isStaleReset(ev.resetSeq)) return;
+      adoptResetSeq(ev.resetSeq);
+
       const path = normPath(ev.path);
       if (!path) return;
       const at = ev.at || Date.now();
@@ -241,14 +440,14 @@
       }
 
       if (promptPhase === "frozen" && !replay) {
-        // If we froze on a premature "complete/idle" but new activity arrives
-        // (edits/writes), reopen and keep the same prompt segment.
-        if (promptEndAt != null && at > promptEndAt + UNFREEZE_GRACE_MS) {
+        // Same prompt still running after a premature idle (keep data).
+        if (promptEndAt != null && at <= promptEndAt + UNFREEZE_GRACE_MS) {
           promptPhase = "running";
           promptEndAt = null;
           updatePromptStatus();
         } else {
-          return;
+          // New prompt / new work — clear prior reads, writes, greps, etc.
+          beginPrompt(at);
         }
       }
 
@@ -368,31 +567,15 @@
       }
     }
 
-    function renderPlaceholderChart(viewport, inner, shouldFrame, savedTransform) {
+    function renderPlaceholderChart(viewport, inner, savedTransform) {
       const now = Date.now();
       const t0 = now - MIN_PROMPT_SPAN_MS;
       const t1 = now;
       const rows = PLACEHOLDER_ROWS;
-      const cw = viewport.clientWidth || 800;
-      const ch = viewport.clientHeight || 400;
-      const chartW = chartWidthForViewport(cw);
-      const svgW = Math.max(cw, GUTTER + chartW + MARGIN_RIGHT);
-      const totalH =
-        MARGIN_TOP +
-        rows.reduce((s, r) => s + (r.type === "dir" ? DIR_ROW_H : ROW_H), 0) +
-        Math.round(16 * SCALE);
-      const svgH = Math.max(ch, totalH);
-      const chartBottom = Math.max(MARGIN_TOP + 40, totalH);
-
-      const svg = d3
-        .select(inner)
-        .append("svg")
-        .attr("width", svgW)
-        .attr("height", svgH);
-
-      const zoomLayer = svg.append("g").attr("class", "zoom-layer");
-      const x = d3.scaleTime().domain([t0, t1]).range([GUTTER, GUTTER + chartW]);
-      const g = zoomLayer.append("g");
+      const layout = computeLayout(viewport, rows, t0, t1);
+      currentLayout = layout;
+      const { svg, labelsG, g, zoomG } = createHorizonSvg(viewport, inner, layout);
+      const { x, chartW, chartBottom, cw } = layout;
 
       g.append("g")
         .attr("class", "axis")
@@ -420,7 +603,8 @@
       let y = MARGIN_TOP + Math.round(22 * SCALE);
       for (const row of rows) {
         const rh = row.type === "dir" ? DIR_ROW_H : ROW_H;
-        g.append("text")
+        labelsG
+          .append("text")
           .attr("class", row.type === "dir" ? "placeholder-dir" : "placeholder-file")
           .attr("x", row.type === "dir" ? 8 : 20)
           .attr("y", y + rh / 2)
@@ -432,10 +616,18 @@
         if (row.type === "file") {
           drawEmptyFileRow(g, y, rh, x, t0, t1);
         } else {
-          g.append("rect")
+          labelsG
+            .append("rect")
             .attr("x", 0)
             .attr("y", y)
-            .attr("width", svgW)
+            .attr("width", GUTTER)
+            .attr("height", rh)
+            .attr("fill", "#18181b")
+            .attr("opacity", 0.35);
+          g.append("rect")
+            .attr("x", GUTTER)
+            .attr("y", y)
+            .attr("width", chartW + MARGIN_RIGHT)
             .attr("height", rh)
             .attr("fill", "#18181b")
             .attr("opacity", 0.35);
@@ -445,13 +637,7 @@
 
       document.getElementById("status-stats").textContent = "—";
 
-      zoomHost.bind(svg, zoomLayer, viewport);
-      if (shouldFrame) {
-        zoomHost.fitToContent({ x0: 0, y0: 0, x1: svgW, y1: svgH }, cw, ch, 24);
-        horizonNeedsFrame = false;
-      } else {
-        svg.call(zoomHost.getBehavior().transform, savedTransform);
-      }
+      applyHorizonView(svg, zoomG, viewport, layout, savedTransform);
     }
 
     function drawPromptMarker(g, x, time, yTop, yBottom, kind) {
@@ -482,7 +668,6 @@
       const viewport = document.getElementById("horizon-viewport");
       const inner = document.getElementById("horizon-chart-inner");
       const range = timeRange();
-      const shouldFrame = horizonNeedsFrame;
       const existingSvg = inner.querySelector("svg");
       const savedTransform = existingSvg
         ? d3.zoomTransform(existingSvg)
@@ -491,32 +676,16 @@
       inner.innerHTML = "";
 
       if (promptPhase === "idle" || !range) {
-        renderPlaceholderChart(viewport, inner, shouldFrame, savedTransform);
+        renderPlaceholderChart(viewport, inner, savedTransform);
         return;
       }
 
       const rows = buildRows();
       const [t0, t1] = range;
-      const cw = viewport.clientWidth || 800;
-      const ch = viewport.clientHeight || 400;
-      const chartW = chartWidthForViewport(cw);
-      const svgW = Math.max(cw, GUTTER + chartW + MARGIN_RIGHT);
-      const totalH =
-        MARGIN_TOP +
-        rows.reduce((s, r) => s + (r.type === "dir" ? DIR_ROW_H : ROW_H), 0) +
-        Math.round(16 * SCALE);
-      const svgH = Math.max(ch, totalH);
-      const chartBottom = Math.max(MARGIN_TOP + 40, totalH);
-
-      const svg = d3
-        .select("#horizon-chart-inner")
-        .append("svg")
-        .attr("width", svgW)
-        .attr("height", svgH);
-
-      const zoomLayer = svg.append("g").attr("class", "zoom-layer");
-      const x = d3.scaleTime().domain([t0, t1]).range([GUTTER, GUTTER + chartW]);
-      const g = zoomLayer.append("g");
+      const layout = computeLayout(viewport, rows, t0, t1);
+      currentLayout = layout;
+      const { svg, labelsG, g, zoomG } = createHorizonSvg(viewport, inner, layout);
+      const { x, chartW, chartBottom, cw } = layout;
 
       g.append("g")
         .attr("class", "axis")
@@ -535,13 +704,14 @@
           .attr("y", y + 24)
           .attr("text-anchor", "middle")
           .attr("fill", "#71717a")
-          .attr("font-size", 12)
+          .attr("font-size", Math.round(12 * SCALE))
           .text("No file activity yet for this prompt.");
       }
 
       for (const row of rows) {
         const rh = row.type === "dir" ? DIR_ROW_H : ROW_H;
-        g.append("text")
+        labelsG
+          .append("text")
           .attr("class", row.type === "dir" ? "dir-label" : "file-label")
           .attr("x", row.type === "dir" ? 8 : 20)
           .attr("y", y + rh / 2)
@@ -562,21 +732,30 @@
             .attr("stroke", "#27272a")
             .attr("stroke-width", 1);
           drawHorizonRow(g, y, rh, row.path, x, t0, t1);
-          g.append("rect")
+          labelsG
+            .append("rect")
             .attr("class", "file-row-hit")
             .attr("x", 0)
             .attr("y", y)
-            .attr("width", svgW)
+            .attr("width", cw)
             .attr("height", rh)
             .on("click", (event) => {
               event.stopPropagation();
               openPreview(row.path, row.label);
             });
         } else {
-          g.append("rect")
+          labelsG
+            .append("rect")
             .attr("x", 0)
             .attr("y", y)
-            .attr("width", svgW)
+            .attr("width", GUTTER)
+            .attr("height", rh)
+            .attr("fill", "#18181b")
+            .attr("opacity", 0.5);
+          g.append("rect")
+            .attr("x", GUTTER)
+            .attr("y", y)
+            .attr("width", chartW + MARGIN_RIGHT)
             .attr("height", rh)
             .attr("fill", "#18181b")
             .attr("opacity", 0.5);
@@ -589,18 +768,7 @@
       document.getElementById("status-stats").textContent =
         `${events.length} events · ${fileMeta.size} files · ${durSec}s · ${phaseLabel}`;
 
-      zoomHost.bind(svg, zoomLayer, viewport);
-      if (shouldFrame) {
-        zoomHost.fitToContent(
-          { x0: 0, y0: 0, x1: svgW, y1: svgH },
-          cw,
-          ch,
-          24
-        );
-        horizonNeedsFrame = false;
-      } else {
-        svg.call(zoomHost.getBehavior().transform, savedTransform);
-      }
+      applyHorizonView(svg, zoomG, viewport, layout, savedTransform);
     }
 
     function handleAgentStatus(data) {
@@ -617,7 +785,7 @@
             "*"
           );
         } catch {}
-        beginPrompt(at);
+        resetForNewPrompt(data);
         return;
       }
       if (phase === "working" && promptPhase === "idle") {
@@ -652,7 +820,9 @@
       }
 
       if (data.type === "activity_batch" && Array.isArray(data.events)) {
-        const evs = data.events.filter((ev) => normPath(ev.path));
+        const evs = data.events.filter(
+          (ev) => normPath(ev.path) && !isStaleReset(ev.resetSeq)
+        );
         if (!evs.length) return;
         if (promptPhase === "idle") {
           const minAt = Math.min(...evs.map((ev) => ev.at || Date.now()));
@@ -672,7 +842,7 @@
 
       if (data.type === "session_reset") {
         notifyParentSessionReset(data.resetSeq);
-        beginPrompt(data.at ?? Date.now());
+        resetForNewPrompt(data);
         return;
       }
 
@@ -712,11 +882,25 @@
     });
     updatePromptStatus();
     attachZoomControls(document.getElementById("horizon-zoom-toolbar"), zoomHost, {
-      hint: "Scroll/zoom · click folders to collapse",
+      hint: "Drag chart to pan/zoom · scrollbar scrolls timeline",
     });
     initPreview();
 
     const timelineSlider = document.getElementById("horizon-timeline-scale");
+    const viewportEl = document.getElementById("horizon-viewport");
+
+    viewportEl?.addEventListener(
+      "wheel",
+      (event) => {
+        if (!currentLayout || currentLayout.scrollMax <= 0) return;
+        const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY) || event.shiftKey;
+        if (!horizontal) return;
+        event.preventDefault();
+        const delta = event.deltaX !== 0 ? event.deltaX : event.deltaY;
+        setTimelineScroll(timelineScrollX + delta, currentLayout, { fromUser: true });
+      },
+      { passive: false }
+    );
 
     async function loadMonitorSettings() {
       try {
@@ -761,10 +945,7 @@
 
     window.addEventListener("resize", () => render());
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) {
-        horizonNeedsFrame = true;
-        render();
-      }
+      if (!document.hidden) render();
     });
     loadMonitorSettings().then(() => render());
   </script>
