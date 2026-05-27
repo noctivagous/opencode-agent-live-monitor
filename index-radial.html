@@ -140,6 +140,7 @@
       const inner = document.getElementById("radial-chart-inner");
       const preserveZoom =
         !!rootNode && opts.preserveZoom !== false && !opts.frameActive && !frameToActive;
+      const animateEnter = opts.animateEnter === true;
 
       if (preserveZoom) {
         const existing = inner.querySelector("svg");
@@ -214,7 +215,7 @@
             const key = d.data.path;
             if (userCollapsed.has(key)) userCollapsed.delete(key);
             else userCollapsed.add(key);
-            renderRadial(treeState, { preserveZoom: true, frameActive: false });
+            renderRadial(treeState, { preserveZoom: true, frameActive: false, animateEnter: true });
           } else if (d.data.path) {
             openPreview(d.data.path, d.data.name);
           }
@@ -274,16 +275,18 @@
           .text(isDir ? chevron + name : name);
       });
 
-      g.selectAll(".link")
-        .attr("opacity", 0)
-        .transition()
-        .duration(180)
-        .attr("opacity", 1);
-      node
-        .attr("opacity", 0)
-        .transition()
-        .duration(180)
-        .attr("opacity", 1);
+      if (animateEnter) {
+        g.selectAll(".link")
+          .attr("opacity", 0)
+          .transition()
+          .duration(180)
+          .attr("opacity", 1);
+        node
+          .attr("opacity", 0)
+          .transition()
+          .duration(180)
+          .attr("opacity", 1);
+      }
 
       zoomHost.bind(svg, zoomLayer, container);
 

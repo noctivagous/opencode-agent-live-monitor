@@ -23,6 +23,37 @@ Or run without cloning:
 npx opencode-agent-live-monitor
 ```
 
+## Auto-start with launchd (macOS)
+
+To avoid manually starting the server, install a user LaunchAgent:
+
+```bash
+# Recommended during development: auto-reload on server.js changes
+npm run launchd:install -- --watch
+
+# Stable mode (no file watching)
+npm run launchd:install -- --stable
+```
+
+Useful commands:
+
+```bash
+# Restart after config changes
+npm run launchd:restart
+
+# Tail launchd logs
+npm run launchd:logs
+
+# Remove LaunchAgent
+npm run launchd:uninstall
+```
+
+Notes:
+- In `--watch` mode, server code changes restart automatically; plugin file changes still require OpenCode restart.
+- Logs are written to:
+  - `~/Library/Logs/aicodeeditor-monitor.log`
+  - `~/Library/Logs/aicodeeditor-monitor.err.log`
+
 ## Dashboard tabs
 
 | Tab | URL | Description |

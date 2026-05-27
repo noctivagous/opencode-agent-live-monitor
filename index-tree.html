@@ -22,7 +22,7 @@
     html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
     .node { cursor: pointer; }
-    .node text { font-size: 11px; font-family: ui-monospace, monospace; pointer-events: none; }
+    .node text { font-size: 11px; font-family: ui-monospace, monospace; pointer-events: auto; }
     .node .dir-capsule { stroke-width: 1.25; }
     .node .active-capsule { fill: none; stroke-width: 2; pointer-events: none; }
     .link { fill: none; stroke: #475569; stroke-width: 1.5px; }
@@ -149,6 +149,7 @@
       const inner = document.getElementById("tree-chart-inner");
       const preserveZoom =
         !!rootNode && opts.preserveZoom !== false && !opts.frameActive && !frameToActive;
+      const animateEnter = opts.animateEnter === true;
 
       if (preserveZoom) {
         const existing = inner.querySelector("svg");
@@ -212,12 +213,12 @@
             const key = d.data.path;
             if (userCollapsed.has(key)) userCollapsed.delete(key);
             else userCollapsed.add(key);
-            renderTree(treeState, { preserveZoom: true, frameActive: false });
+            renderTree(treeState, { preserveZoom: true, frameActive: false, animateEnter: true });
           } else if (d.data.path) {
             openPreview(d.data.path, d.data.name);
           }
         })
-        .style("cursor", (d) => (d.data.type === "dir" ? "pointer" : "text"));
+        .style("cursor", "pointer");
 
       node.each(function (d) {
         const sel = d3.select(this);
@@ -286,16 +287,18 @@
         }
       });
 
-      g.selectAll(".link")
-        .attr("opacity", 0)
-        .transition()
-        .duration(180)
-        .attr("opacity", 1);
-      node
-        .attr("opacity", 0)
-        .transition()
-        .duration(180)
-        .attr("opacity", 1);
+      if (animateEnter) {
+        g.selectAll(".link")
+          .attr("opacity", 0)
+          .transition()
+          .duration(180)
+          .attr("opacity", 1);
+        node
+          .attr("opacity", 0)
+          .transition()
+          .duration(180)
+          .attr("opacity", 1);
+      }
 
       zoomHost.bind(svg, zoomLayer, container);
 

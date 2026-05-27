@@ -10,6 +10,7 @@
   "files": [
     "index.js",
     "bin/",
+    "scripts/",
     "live-monitor-plugin.js",
     "server.js",
     "dashboard.html",
@@ -28,8 +29,13 @@
     "README.md"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "test": "echo \"No tests yet\"",
+    "start": "node server.js",
+    "start:watch": "node --watch server.js",
+    "launchd:install": "bash scripts/launchd-install.sh",
+    "launchd:restart": "bash scripts/launchd-restart.sh",
+    "launchd:uninstall": "bash scripts/launchd-uninstall.sh",
+    "launchd:logs": "bash -lc 'tail -n 80 -f \"$HOME/Library/Logs/aicodeeditor-monitor.log\" \"$HOME/Library/Logs/aicodeeditor-monitor.err.log\"'"
   },
   "keywords": [
     "opencode-plugin",

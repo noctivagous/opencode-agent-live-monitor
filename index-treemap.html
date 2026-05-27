@@ -483,7 +483,7 @@
       nav.querySelectorAll("button").forEach((btn) => {
         btn.onclick = () => {
           viewPath = btn.dataset.path;
-          render();
+          render({ animateEnter: true });
         };
       });
     }
@@ -491,6 +491,7 @@
     function render(opts = {}) {
       expireFlashes();
       const preserveZoom = opts.preserveZoom !== false && !frameToFit;
+      const animateEnter = opts.animateEnter === true;
 
       const chartEl = document.getElementById("chart");
       if (chartEl.querySelector("svg") && preserveZoom) {
@@ -537,7 +538,7 @@
       svg.on("click", () => {
         if (!viewPath) return;
         viewPath = parentPath(viewPath);
-        render();
+        render({ animateEnter: true });
       });
 
       if (nodes.length === 0) {
@@ -574,7 +575,7 @@
           event.stopPropagation();
           if (d.children) {
             viewPath = viewPath === d.data.path ? parentPath(viewPath) : d.data.path;
-            render();
+            render({ animateEnter: true });
           } else if (d.data.path) {
             openPreview(d.data.path, d.data.name);
           }
@@ -678,11 +679,13 @@
         });
 
       drawWriteSpinner(nodes);
-      cellLayer
-        .attr("opacity", 0)
-        .transition()
-        .duration(180)
-        .attr("opacity", 1);
+      if (animateEnter) {
+        cellLayer
+          .attr("opacity", 0)
+          .transition()
+          .duration(180)
+          .attr("opacity", 1);
+      }
       renderBreadcrumb();
       applyZoomAfterRender({ preserveZoom });
     }
