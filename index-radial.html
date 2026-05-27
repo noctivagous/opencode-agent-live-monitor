@@ -23,7 +23,7 @@
     body { display: flex; flex-direction: column; }
     .link { fill: none; stroke: #475569; stroke-opacity: 0.6; }
     .node circle { cursor: pointer; }
-    .node text { font-size: 9px; font-family: ui-monospace, monospace; pointer-events: none; }
+    .node text { font-family: ui-monospace, monospace; pointer-events: none; }
     .node .active-ring { fill: none; pointer-events: none; }
     #radial-chart {
       flex: 1;
@@ -57,7 +57,9 @@
 
   <script>
     const { setBadge } = MonitorBadges;
-    const { cloneTree, createTreeApi } = MonitorTree;
+    const { cloneTree, createTreeApi, nodeFontSizePx, linkStrokeWidthPx } = MonitorTree;
+    const RADIAL_LABEL_BASE_PX = 9;
+    const RADIAL_ICON_BASE_PX = 10;
     const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
     const { createZoomHost, attachZoomControls } = MonitorZoom;
     const { initLegend } = MonitorLegend;
@@ -197,7 +199,8 @@
             .linkRadial()
             .angle((d) => d.x)
             .radius((d) => d.y)
-        );
+        )
+        .attr("stroke-width", (d) => linkStrokeWidthPx(d.target.depth));
 
       const node = g
         .append("g")
@@ -227,6 +230,8 @@
         const activeAction = nodeActiveAction(d.data);
         const strokeColor = activeAction ? ACTION_COLORS[activeAction] || "#a78bfa" : null;
         const onLeft = d.x < Math.PI;
+        const labelPx = nodeFontSizePx(RADIAL_LABEL_BASE_PX, d.depth);
+        const iconPx = nodeFontSizePx(RADIAL_ICON_BASE_PX, d.depth);
 
         if (strokeColor) {
           sel
@@ -234,15 +239,15 @@
             .attr("class", "active-ring")
             .attr("cx", onLeft ? 14 : -14)
             .attr("cy", 0)
-            .attr("rx", isDir ? 42 : 36)
-            .attr("ry", 10)
+            .attr("rx", isDir ? labelPx * 3.1 : labelPx * 2.7)
+            .attr("ry", Math.max(8, labelPx * 0.85))
             .attr("stroke", strokeColor)
             .attr("stroke-width", 2);
         }
 
         sel
           .append("circle")
-          .attr("r", (d) => (d.children ? 4 : 3))
+          .attr("r", d.children ? Math.max(3, labelPx * 0.32) : Math.max(2.5, labelPx * 0.26))
           .attr("fill", nodeFill)
           .attr("stroke", strokeColor || "#09090b")
           .attr("stroke-width", strokeColor ? 1.5 : 0.5);
@@ -259,7 +264,7 @@
           .attr("x", onLeft ? 6 : -6)
           .attr("text-anchor", onLeft ? "start" : "end")
           .attr("transform", onLeft ? null : "rotate(180)")
-          .attr("font-size", "10px")
+          .attr("font-size", `${iconPx}px`)
           .text(icon);
 
         sel
@@ -270,7 +275,7 @@
           .attr("text-anchor", onLeft ? "start" : "end")
           .attr("transform", onLeft ? null : "rotate(180)")
           .attr("fill", d.data.visited ? "#e4e4e7" : "#a1a1aa")
-          .attr("font-size", "9px")
+          .attr("font-size", `${labelPx}px`)
           .attr("font-family", "ui-monospace, monospace")
           .text(isDir ? chevron + name : name);
       });

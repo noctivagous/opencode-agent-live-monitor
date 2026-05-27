@@ -22,10 +22,10 @@
     html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
     body { display: flex; flex-direction: column; }
     .node { cursor: pointer; }
-    .node text { font-size: 11px; font-family: ui-monospace, monospace; pointer-events: auto; }
+    .node text { font-family: ui-monospace, monospace; pointer-events: auto; }
     .node .dir-capsule { stroke-width: 1.25; }
     .node .active-capsule { fill: none; stroke-width: 2; pointer-events: none; }
-    .link { fill: none; stroke: #475569; stroke-width: 1.5px; }
+    .link { fill: none; stroke: #475569; }
     #tree-chart {
       flex: 1;
       min-height: 0;
@@ -59,7 +59,9 @@
 
   <script>
     const { setBadge } = MonitorBadges;
-    const { cloneTree, createTreeApi } = MonitorTree;
+    const { cloneTree, createTreeApi, nodeFontSizePx, linkStrokeWidthPx } = MonitorTree;
+    const TREE_LABEL_BASE_PX = 11;
+    const TREE_ICON_BASE_PX = 12;
     const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
     const { createZoomHost, attachZoomControls } = MonitorZoom;
     const { initLegend } = MonitorLegend;
@@ -110,8 +112,8 @@
       );
     }
 
-    function appendActiveCapsule(sel, isDir, label, labelX, estLabelW) {
-      const capH = isDir ? 18 : 16;
+    function appendActiveCapsule(sel, isDir, label, labelX, estLabelW, labelPx) {
+      const capH = Math.max(14, Math.round(labelPx * (isDir ? 1.35 : 1.2)));
       const capW = estLabelW + 14;
       sel
         .insert("rect", ":first-child")
@@ -186,7 +188,7 @@
       const cw = Math.max(320, container.clientWidth || 320);
       const ch = Math.max(200, container.clientHeight || 200);
       const width = Math.max(cw * 2, maxDepth * 220 + 280);
-      const height = Math.max(ch * 2, visible * 26 + 80);
+      const height = Math.max(ch * 2, visible * 39 + 80);
 
       const svg = d3.select("#tree-chart-inner").append("svg").attr("width", width).attr("height", height);
       const zoomLayer = svg.append("g");
@@ -198,7 +200,8 @@
         .enter()
         .append("path")
         .attr("class", "link")
-        .attr("d", d3.linkHorizontal().x((d) => d.y).y((d) => d.x));
+        .attr("d", d3.linkHorizontal().x((d) => d.y).y((d) => d.x))
+        .attr("stroke-width", (d) => linkStrokeWidthPx(d.target.depth));
 
       const node = g
         .selectAll(".node")
@@ -233,12 +236,14 @@
           : !d.data.visited
             ? "#94a3b8"
             : "#e2e8f0";
+        const labelPx = nodeFontSizePx(TREE_LABEL_BASE_PX, d.depth);
+        const iconPx = nodeFontSizePx(TREE_ICON_BASE_PX, d.depth);
         const labelX = 20;
         const iconX = 2;
-        const estLabelW = Math.max(40, label.length * 6.2);
+        const estLabelW = Math.max(40, label.length * (labelPx * 0.56));
 
         if (strokeColor) {
-          appendActiveCapsule(sel, isDir, label, labelX, estLabelW);
+          appendActiveCapsule(sel, isDir, label, labelX, estLabelW, labelPx);
           sel.select(".active-capsule").attr("stroke", strokeColor);
         }
 
@@ -246,11 +251,11 @@
           .append("text")
           .attr("x", iconX)
           .attr("dy", "0.32em")
-          .attr("font-size", "12px")
+          .attr("font-size", `${iconPx}px`)
           .text(icon);
 
         if (isDir) {
-          const capH = 18;
+          const capH = Math.max(14, Math.round(labelPx * 1.35));
           const capW = estLabelW + 12;
           sel
             .append("rect")
@@ -266,13 +271,14 @@
             .append("text")
             .attr("x", labelX)
             .attr("dy", "0.32em")
+            .attr("font-size", `${labelPx}px`)
             .text(label)
             .style("fill", labelFill);
         } else {
           if (d.data.isFocus) {
             sel
               .append("circle")
-              .attr("r", 4)
+              .attr("r", Math.max(3, labelPx * 0.28))
               .attr("cx", labelX - 4)
               .attr("cy", 0)
               .attr("fill", "#22c55e")
@@ -282,6 +288,7 @@
             .append("text")
             .attr("x", labelX)
             .attr("dy", "0.32em")
+            .attr("font-size", `${labelPx}px`)
             .text(d.data.name)
             .style("fill", labelFill);
         }

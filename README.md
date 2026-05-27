@@ -1,10 +1,10 @@
 # Agent Live Monitor
 
-A real-time visualization dashboard for [OpenCode](https://opencode.ai) agents. Watch file activity, project structure, and per-prompt timelines while the agent works.  Zoom in and out on charts, click files to preview their contents.
+A real-time visualization dashboard for [OpenCode](https://opencode.ai) agents. Watch file activity, project structure, and per-prompt timelines while the agent works.  Zoom in and out on charts, click files to preview their contents.  
 
 ## What it does
 
-The monitor runs as a small local server plus an OpenCode plugin. The plugin observes agent hooks (reads, edits, tools, prompts) and streams JSON events over WebSocket. The browser dashboard shows five synchronized views in tabs, each tuned for a different way to see the same session.
+The monitor runs as a small local server plus an OpenCode plugin. The plugin observes agent hooks (reads, edits, tools, prompts) and streams JSON events over WebSocket. The browser dashboard shows five synchronized views in tabs, each tuned for a different way to see the same session.  It fits the workflow better on a second widescreen display while opencode is used on the main display.
 
 <table>
   <tr>
@@ -189,10 +189,10 @@ schtasks /Delete /TN "AICodeEditor Monitor" /F
 - Full index on connect; capsule/ring highlights for current activity
 
 ### Horizon
-- One timeline **per prompt**: violet **Prompt start** line when a prompt begins
+- One timeline **per user prompt** (not per subtask/tool round): **Prompt start** on `prompt_submitted` / `session_reset`
 - Timeline advances live while the agent runs
-- Sky **Prompt complete** line when the session finishes; timeline **stops** (frozen)
-- Next prompt clears and starts a new segment
+- **Prompt complete** when the plugin’s debounced `session_idle` fires (whole run idle ~3.5s); timeline **freezes**
+- Next top-level user message clears and starts a new segment
 - Rows grouped by directory; mirrored horizon bands colored by action (1s bins)
 
 ## Project layout
@@ -257,11 +257,13 @@ The dashboard server must be running before OpenCode connects.
 | `project_index` | Full project file tree (gray baseline) |
 | `update` | Tree snapshot + active files + log lines |
 | `session_reset` | Reset visited colors; new prompt on treemap/horizon |
-| `agent_status` | `prompt_submitted`, `working`, `complete` + optional summary (UI only; dashboard popover uses `session_idle`) |
+| `agent_status` | `prompt_submitted` (top-level user message only), `working`, `complete` + optional summary |
 | `activity_event` | Timestamped file action for Horizon |
 | `activity_batch` | Replay recent `activity_event`s on browser connect |
 | `file_progress` | Active write path for treemap spinner |
-| `status` | Plugin connected / waiting / `session_idle` (true prompt end — drives “Prompt complete” popover) |
+| `status` | Plugin connected / waiting / `session_idle` (debounced whole-prompt end — Horizon markers + dashboard popover) |
+
+**Prompt boundaries (plugin):** `message.updated` with role `user` starts a run only when the message is top-level (not a subagent `parentID` session), not `synthetic`, and not a task-tool injection. `session.status` / `session.idle` with `idle` end the run after **3.5s** of sustained idle (`AICODE_MONITOR_IDLE_DEBOUNCE_MS`), cancelled by `busy`/`retry` or any `tool.execute.before`. OpenCode fires `session.idle` after each agent-loop iteration, not only when the full user prompt is done.
 
 ### Example `activity_event`
 

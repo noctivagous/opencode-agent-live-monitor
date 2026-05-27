@@ -391,6 +391,62 @@ function isIdleStatusText(raw) {
   return /\b(idle|complete|completed|finished|done)\b/i.test(t);
 }
 
+function extractHookBag(input, output) {
+  return output ?? input ?? {};
+}
+
+function extractSessionStatusType(input, output, event) {
+  const fromEvent = event?.properties?.status ?? event?.data?.status;
+  if (fromEvent?.type) return fromEvent.type;
+  const bag = extractHookBag(input, output);
+  const status = bag.status ?? bag.data?.status;
+  if (status && typeof status === "object" && status.type) return status.type;
+  return null;
+}
+
+/** Subagent / task-tool sessions have parentID; only the root session counts as a user prompt. */
+function isTopLevelSession(input, output) {
+  const bag = extractHookBag(input, output);
+  const session = bag.session ?? bag.data?.session;
+  if (session?.parentID || session?.parentId) return false;
+  const parentID =
+    bag.parentID ??
+    bag.parentId ??
+    input?.parentID ??
+    input?.parentId ??
+    output?.parentID ??
+    output?.parentId;
+  return !parentID;
+}
+
+function messageHasSyntheticPart(input, output) {
+  const bag = extractHookBag(input, output);
+  const msg = bag.message ?? bag;
+  if (msg?.info?.synthetic || msg?.synthetic) return true;
+  const parts = msg?.parts ?? bag.parts;
+  if (!Array.isArray(parts)) return false;
+  return parts.some((p) => p && (p.synthetic === true || p.type === "synthetic"));
+}
+
+/** OpenCode injects synthetic user turns after subtasks (task tool, subtask commands). */
+function isInjectedUserMessage(input, output) {
+  const text = extractPromptText(input, output);
+  if (!text) return false;
+  if (/^<task_(result|error)>/i.test(text.trim())) return true;
+  if (/Background task (completed|failed):/i.test(text)) return true;
+  if (/summarize the task tool output/i.test(text)) return true;
+  return false;
+}
+
+/** True only for a real top-level user message (start of a full prompt run). */
+function isRealUserPromptMessage(input, output) {
+  if (extractMessageRole(input, output) !== "user") return false;
+  if (!isTopLevelSession(input, output)) return false;
+  if (messageHasSyntheticPart(input, output)) return false;
+  if (isInjectedUserMessage(input, output)) return false;
+  return true;
+}
+
 function extractPaths(root, input, output) {
   const paths = [];
   const primary = pickFilePath(input, output);
@@ -429,6 +485,9 @@ export default async function liveMonitorPlugin(ctx) {
   let activeWritePath = null;
   let agentPhase = "idle";
   let resetSeq = 0;
+  let idleCompleteTimer = null;
+  /** session.idle fires after each agent-loop iteration; debounce until the run stays idle. */
+  const PROMPT_IDLE_DEBOUNCE_MS = Number(process.env.AICODE_MONITOR_IDLE_DEBOUNCE_MS) || 3500;
 
   const monitorUrl =
     process.env.AICODE_MONITOR_WS_URL ||
@@ -534,8 +593,36 @@ export default async function liveMonitorPlugin(ctx) {
   };
 
   let lastCompleteAt = 0;
-  /** End-of-run only: OpenCode `session.idle` (agent loop finished), not per-message or status text. */
+
+  const cancelPromptIdleComplete = () => {
+    if (idleCompleteTimer) clearTimeout(idleCompleteTimer);
+    idleCompleteTimer = null;
+  };
+
+  /** Debounced: one idle burst between tool rounds must not end the whole prompt. */
+  const schedulePromptIdleComplete = () => {
+    cancelPromptIdleComplete();
+    if (agentPhase !== "working") return;
+    idleCompleteTimer = setTimeout(() => {
+      idleCompleteTimer = null;
+      if (agentPhase !== "working") return;
+      markPromptComplete();
+    }, PROMPT_IDLE_DEBOUNCE_MS);
+  };
+
+  const handleSessionStatusType = (statusType) => {
+    if (statusType === "busy" || statusType === "retry") {
+      cancelPromptIdleComplete();
+      return;
+    }
+    if (statusType === "idle") {
+      schedulePromptIdleComplete();
+    }
+  };
+
+  /** Whole prompt run finished (debounced session.status / session.idle). */
   const markPromptComplete = async (summaryText) => {
+    cancelPromptIdleComplete();
     const now = Date.now();
     if (agentPhase === "idle" && now - lastCompleteAt < 400) return;
     lastCompleteAt = now;
@@ -563,6 +650,7 @@ export default async function liveMonitorPlugin(ctx) {
   };
 
   const onNewUserPrompt = async (input, output) => {
+    cancelPromptIdleComplete();
     const promptText = truncatePrompt(extractPromptText(input, output));
     lastPrompt = promptText || null;
     lastAssistantSummary = null;
@@ -644,6 +732,7 @@ export default async function liveMonitorPlugin(ctx) {
     "message.updated": async (input, output) => {
       const role = extractMessageRole(input, output);
       if (role === "user") {
+        if (!isRealUserPromptMessage(input, output)) return;
         await onNewUserPrompt(input, output);
         return;
       }
@@ -667,6 +756,14 @@ export default async function liveMonitorPlugin(ctx) {
     },
 
     "session.status": async (input, output) => {
+      const statusType = extractSessionStatusType(input, output);
+      if (statusType) {
+        handleSessionStatusType(statusType);
+        if (statusType !== "idle") {
+          await forwardSessionStatus(input, output);
+        }
+        return;
+      }
       await forwardSessionStatus(input, output);
     },
 
@@ -678,6 +775,7 @@ export default async function liveMonitorPlugin(ctx) {
     },
 
     "tool.execute.before": async (input, output) => {
+      cancelPromptIdleComplete();
       const tool = pickToolName(input, output);
       const primary = pickFilePath(input, output);
       const rel = primary ? monitor.toRelative(primary) : null;
@@ -763,11 +861,15 @@ export default async function liveMonitorPlugin(ctx) {
 
     event: async ({ event }) => {
       if (!event?.type) return;
-      if (event.type === "session.idle") {
-        await markPromptComplete();
+      if (event.type === "session.status") {
+        handleSessionStatusType(extractSessionStatusType(null, null, event));
         return;
       }
-      if (event.type === "session.status" || event.type === "session.updated") {
+      if (event.type === "session.idle") {
+        schedulePromptIdleComplete();
+        return;
+      }
+      if (event.type === "session.updated") {
         const raw =
           event.data?.status ??
           event.data?.message ??
@@ -778,8 +880,9 @@ export default async function liveMonitorPlugin(ctx) {
       }
     },
 
+    /** @deprecated — same as session.status idle; debounced so loop iterations do not end the run. */
     "session.idle": async () => {
-      await markPromptComplete();
+      schedulePromptIdleComplete();
     },
   };
 }

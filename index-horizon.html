@@ -144,30 +144,9 @@
     let promptPhase = "idle";
     let promptStartAt = null;
     let promptEndAt = null;
-    const INACTIVITY_FREEZE_MS = 3000;
-    // Some OpenCode flows emit an early "complete/idle" while tool actions
-    // (edits/writes) are still happening. Allow a short grace period to reopen.
+    // Plugin debounces session.idle between agent-loop iterations; brief local grace only.
     const UNFREEZE_GRACE_MS = 150;
     let lastActivityAt = null;
-    let inactivityTimer = null;
-
-    function clearInactivityTimer() {
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-      inactivityTimer = null;
-    }
-
-    function scheduleInactivityFreeze() {
-      clearInactivityTimer();
-      if (promptPhase !== "running") return;
-      if (lastActivityAt == null) return;
-      inactivityTimer = setTimeout(() => {
-        if (promptPhase !== "running") return;
-        if (lastActivityAt == null) return;
-        if (Date.now() - lastActivityAt >= INACTIVITY_FREEZE_MS) {
-          endPrompt(Date.now());
-        }
-      }, INACTIVITY_FREEZE_MS + 50);
-    }
 
     function chartTimelineWidth() {
       return Math.max(MIN_CHART_W, Math.round(BASE_TIMELINE_PX * timelineScale));
@@ -399,7 +378,6 @@
       lastActivityAt = null;
       timelineScrollX = 0;
       followLiveEdge = true;
-      clearInactivityTimer();
       updatePromptStatus();
       render();
     }
@@ -411,7 +389,6 @@
 
     function endPrompt(at) {
       if (promptPhase !== "running" || promptStartAt == null) return;
-      clearInactivityTimer();
       promptEndAt = at ?? Date.now();
       if (promptEndAt < promptStartAt) promptEndAt = promptStartAt + 1;
       promptPhase = "frozen";
@@ -473,7 +450,6 @@
       }
 
       lastActivityAt = at;
-      if (promptPhase === "running") scheduleInactivityFreeze();
     }
 
     function buildRows() {
@@ -786,10 +762,6 @@
           );
         } catch {}
         resetForNewPrompt(data);
-        return;
-      }
-      if (phase === "working" && promptPhase === "idle") {
-        beginPrompt(at);
         return;
       }
     }

@@ -117,11 +117,24 @@
     };
   }
 
+  /** Base label size × 1.5, then −10% per depth level. */
+  function nodeFontSizePx(basePx, depth) {
+    return basePx * 1.5 * 0.9 ** Math.max(0, depth);
+  }
+
+  /** Parent→child links: 5pt at first level, thinner for deeper targets. */
+  function linkStrokeWidthPx(targetDepth) {
+    if (targetDepth <= 0) return 5;
+    return Math.max(0.75, 5 * 0.9 ** (targetDepth - 1));
+  }
+
   global.MonitorTree = {
     normPath,
     sortNodes,
     cloneTree,
     hasVisitedDescendant,
     createTreeApi,
+    nodeFontSizePx,
+    linkStrokeWidthPx,
   };
 })(typeof window !== "undefined" ? window : globalThis);
