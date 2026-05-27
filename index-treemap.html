@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Monitor — Treemap</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #09090b; }
+    body { display: flex; flex-direction: column; }
+    #chart { flex: 1; min-height: 0; overflow: hidden; }
+    #chart svg { display: block; width: 100%; height: 100%; }
+    @keyframes monitor-spin { to { transform: rotate(360deg); } }
+    .write-spinner-ring {
+      animation: monitor-spin 0.85s linear infinite;
+      transform-origin: center;
+      transform-box: fill-box;
+    }
+  </style>
+</head>
+<body class="text-zinc-200">
+  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950">
+    <div id="status-line" class="px-3 py-2 text-sm border-b border-zinc-800/80 bg-zinc-900/80 text-zinc-300 min-h-[2.75rem]">
+      <div id="status-prompt" class="text-xs text-zinc-500 truncate mb-0.5 hidden"></div>
+      <div id="status-summary" class="text-xs text-emerald-400/90 truncate mb-0.5 hidden"></div>
+      <div id="status-run" class="text-zinc-200">Connecting…</div>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 px-3 py-1.5 text-xs">
+      <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
+      <span class="font-semibold text-sm">Treemap</span>
+      <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">Browser…</span>
+      <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">Plugin…</span>
+      <span id="status-index" class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">Index…</span>
+      <nav id="breadcrumb" class="flex flex-wrap items-center gap-1 font-mono text-zinc-400"></nav>
+      <span class="ml-auto text-zinc-600">Gray = untouched · click folder to zoom</span>
+    </div>
+  </header>
+
+  <div id="chart"></div>
+
+  <div
+    id="preview-popover"
+    class="fixed right-4 top-20 w-[400px] h-[500px] max-w-full max-h-[calc(100vh-6rem)] bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl shadow-black/70 hidden z-50 flex flex-col overflow-hidden"
+  >
+    <div class="flex items-center justify-between px-3 py-2 border-b border-zinc-800 bg-zinc-900/90 text-xs">
+      <div class="flex flex-col overflow-hidden">
+        <span id="preview-title" class="font-mono truncate text-zinc-200">Preview</span>
+        <span id="preview-subtitle" class="text-[10px] text-zinc-500 truncate">—</span>
+      </div>
+      <button
+        id="preview-close"
+        type="button"
+        class="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800"
+      >
+        Close
+      </button>
+    </div>
+    <div class="flex-1 min-h-0 bg-zinc-950/95">
+      <pre
+        id="preview-body"
+        class="h-full w-full text-[11px] leading-relaxed font-mono text-zinc-200 px-3 py-2 overflow-auto whitespace-pre-wrap"
+      ></pre>
+    </div>
+  </div>
+
+  <script>
+    /** Must match plugin SHOW_GLOBS — when false, glob touches are ignored. */
+    const SHOW_GLOBS = false;
+    /** Must match plugin RESET_VISITED_ON_PROMPT. */
+    const RESET_VISITED_ON_PROMPT = true;
+
+    const ACTION_COLORS = {
+      read: "#2563eb",
+      edit: "#16a34a",
+      list: "#7c3aed",
+      glob: "#9333ea",
+      grep: "#a855f7",
+      bash: "#ca8a04",
+    };
+    const UNTOUCHED_FILE = "#52525b";
+    const UNTOUCHED_DIR = "#3f3f46";
+    const VISITED_MUTED = "#71717a";
+    const TITLE_BAR = 20;
+    const ACTION_BAR = 18;
+    const FLASH_MS = 2000;
+    const ICON_DIR = "\u{1F4C1}";
+    const ICON_FILE = "\u{1F4C4}";
+
+    let baseTree = null;
+    let indexSnapshot = null;
+    let hasFullIndex = false;
+    let projectLabel = "project";
+    const flashes = new Map();
+    let viewPath = "";
+    let lastPrompt = "";
+    let lastSummary = "";
+    let resetSeq = 0;
+    let inProgressPath = null;
+    let width = 0;
+    let height = 0;
+    let svg, cellLayer, labelLayer, spinnerLayer;
+    let previewPath = "";
+
+    function cloneNode(n) {
+      return {
+        name: n.name,
+        path: n.path ?? "",
+        type: n.type || "file",
+        visited: !!n.visited,
+        action: n.action || null,
+        flashing: false,
+        children: (n.children || []).map(cloneNode),
+      };
+    }
+
+    function normPath(p) {
+      return (p || "").replace(/\\/g, "/");
+    }
+
+    function shouldShowAction(action) {
+      return SHOW_GLOBS || action !== "glob";
+    }
+
+    function findNode(node, relPath) {
+      const key = normPath(relPath);
+      if (normPath(node.path) === key) return node;
+      for (const c of node.children || []) {
+        const hit = findNode(c, relPath);
+        if (hit) return hit;
+      }
+      return null;
+    }
+
+    function resetVisited(node) {
+      node.visited = false;
+      node.action = null;
+      for (const c of node.children || []) resetVisited(c);
+    }
+
+    function grayTreemapFromIndex() {
+      if (indexSnapshot) {
+        baseTree = cloneNode(indexSnapshot);
+        return;
+      }
+      if (baseTree) resetVisited(baseTree);
+    }
+
+    function applySessionReset(data) {
+      if (!RESET_VISITED_ON_PROMPT) return;
+      if (data.resetSeq != null) resetSeq = data.resetSeq;
+      flashes.clear();
+      inProgressPath = null;
+      viewPath = "";
+      if (data.tree) {
+        baseTree = cloneNode(data.tree);
+      } else {
+        grayTreemapFromIndex();
+      }
+      setRunStatus("~ Treemap reset — all cells gray until agent acts", "muted");
+      render();
+    }
+
+    function applyPromptSubmittedReset(data) {
+      if (!RESET_VISITED_ON_PROMPT) return;
+      if (data.resetSeq != null && data.resetSeq <= resetSeq) return;
+      applySessionReset({
+        resetSeq: data.resetSeq ?? resetSeq + 1,
+        tree: indexSnapshot ? cloneNode(indexSnapshot) : null,
+      });
+    }
+
+    function stampFlash(nodePath, action) {
+      const key = normPath(nodePath);
+      if (!key || !action || !shouldShowAction(action)) return;
+      flashes.set(key, { action, flashUntil: Date.now() + FLASH_MS });
+    }
+
+    function expireFlashes() {
+      const now = Date.now();
+      for (const [k, t] of flashes) {
+        if (t.flashUntil <= now) flashes.delete(k);
+      }
+    }
+
+    function applyFlashing(node) {
+      const t = flashes.get(normPath(node.path));
+      node.flashing = !!(t && t.flashUntil > Date.now());
+      for (const c of node.children || []) applyFlashing(c);
+    }
+
+    function sortChildren(parent) {
+      parent.children.sort((a, b) =>
+        a.type !== b.type ? (a.type === "dir" ? -1 : 1) : a.name.localeCompare(b.name)
+      );
+    }
+
+    function ensureChild(parent, name, relPath, type) {
+      let child = parent.children.find((c) => c.name === name);
+      if (!child) {
+        child = { name, path: relPath, type, visited: false, action: null, children: [] };
+        parent.children.push(child);
+        sortChildren(parent);
+      }
+      return child;
+    }
+
+    function mergeActivityIntoBase(base, activity) {
+      if (!base || !activity) return;
+
+      function walk(node) {
+        const nodePath = normPath(node.path);
+        if (!nodePath || !node.visited) {
+          for (const c of node.children || []) walk(c);
+          return;
+        }
+        if (node.action === "glob" && !SHOW_GLOBS) return;
+
+        let target = findNode(base, nodePath);
+        if (!target) {
+          const parts = nodePath.split("/").filter(Boolean);
+          let parent = base;
+          let built = "";
+          for (let i = 0; i < parts.length; i++) {
+            built = built ? `${built}/${parts[i]}` : parts[i];
+            const isLast = i === parts.length - 1;
+            parent = ensureChild(parent, parts[i], built, isLast ? node.type || "file" : "dir");
+          }
+          target = findNode(base, nodePath);
+        }
+        if (target) {
+          const actionChanged = target.action !== node.action;
+          const newlyVisited = !target.visited;
+          target.visited = true;
+          if (node.action && shouldShowAction(node.action)) target.action = node.action;
+          if (newlyVisited || actionChanged) stampFlash(nodePath, node.action);
+        }
+        for (const c of node.children || []) walk(c);
+      }
+
+      walk(activity);
+    }
+
+    function displayName(d) {
+      const icon = d.data.type === "dir" ? ICON_DIR : ICON_FILE;
+      return `${icon} ${d.data.name}`;
+    }
+
+    function fillColor(d) {
+      const n = d.data;
+      if (!n.visited) return n.type === "dir" ? UNTOUCHED_DIR : UNTOUCHED_FILE;
+      if (n.flashing && n.action) {
+        const c = ACTION_COLORS[n.action] || "#6366f1";
+        return d3.color(c).brighter(0.6);
+      }
+      if (n.action && ACTION_COLORS[n.action]) {
+        return d3.color(ACTION_COLORS[n.action]).darker(0.35);
+      }
+      return VISITED_MUTED;
+    }
+
+    function paddingTopFor(d) {
+      if (d.children) return TITLE_BAR;
+      if (d.data.flashing && d.data.action) return ACTION_BAR;
+      return 0;
+    }
+
+    function titleBarHeight(d) {
+      const h = d.y1 - d.y0;
+      const want = paddingTopFor(d);
+      if (!want || !h) return want;
+      return Math.min(want, h * 0.45);
+    }
+
+    function updatePromptLine(prompt) {
+      const el = document.getElementById("status-prompt");
+      if (!prompt) {
+        el.classList.add("hidden");
+        el.textContent = "";
+        el.title = "";
+        return;
+      }
+      el.classList.remove("hidden");
+      el.textContent = `Prompt: “${prompt}”`;
+      el.title = prompt;
+    }
+
+    function updateSummaryLine(summary) {
+      const el = document.getElementById("status-summary");
+      if (!summary) {
+        el.classList.add("hidden");
+        el.textContent = "";
+        el.title = "";
+        return;
+      }
+      el.classList.remove("hidden");
+      el.textContent = `Summary: ${summary}`;
+      el.title = summary;
+    }
+
+    function setRunStatus(text, tone, promptOverride) {
+      const el = document.getElementById("status-run");
+      const tones = {
+        ok: "text-emerald-400",
+        working: "text-amber-300",
+        idle: "text-sky-400",
+        complete: "text-emerald-400",
+        warn: "text-amber-500",
+        bad: "text-red-400",
+        muted: "text-zinc-400",
+      };
+      if (promptOverride !== undefined) {
+        lastPrompt = promptOverride || "";
+        updatePromptLine(lastPrompt);
+      }
+      el.textContent = text || "";
+      el.className = tones[tone] || tones.muted;
+    }
+
+    function setBadge(id, text, tone) {
+      const tones = {
+        ok: "bg-emerald-950 text-emerald-300",
+        warn: "bg-amber-950 text-amber-300",
+        bad: "bg-red-950 text-red-300",
+        idle: "bg-zinc-800 text-zinc-400",
+      };
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    }
+
+    function ensureChart() {
+      const el = document.getElementById("chart");
+      width = el.clientWidth;
+      height = el.clientHeight;
+      d3.select("#chart").selectAll("svg").remove();
+      svg = d3.select("#chart").append("svg").attr("width", width).attr("height", height);
+      cellLayer = svg.append("g");
+      labelLayer = svg.append("g");
+      spinnerLayer = svg.append("g").attr("class", "spinners");
+    }
+
+    function drawWriteSpinner(nodes) {
+      if (!spinnerLayer || !inProgressPath) return;
+      spinnerLayer.selectAll("*").remove();
+      const target = nodes.find((d) => normPath(d.data.path) === normPath(inProgressPath));
+      if (!target) return;
+
+      const w = target.x1 - target.x0;
+      const h = target.y1 - target.y0;
+      if (w < 24 || h < 24) return;
+
+      const cx = w / 2;
+      const cy = Math.min(22, h * 0.22);
+      const g = spinnerLayer
+        .append("g")
+        .attr("transform", `translate(${target.x0},${target.y0})`);
+
+      g.append("circle")
+        .attr("class", "write-spinner-ring")
+        .attr("cx", cx)
+        .attr("cy", cy)
+        .attr("r", 9)
+        .attr("fill", "none")
+        .attr("stroke", "#4ade80")
+        .attr("stroke-width", 2.5)
+        .attr("stroke-dasharray", "8 12")
+        .attr("opacity", 0.95);
+
+      g.append("text")
+        .attr("x", cx)
+        .attr("y", cy + 18)
+        .attr("text-anchor", "middle")
+        .attr("fill", "#86efac")
+        .attr("font-size", 9)
+        .attr("font-weight", 700)
+        .text("WRITING");
+    }
+
+    function renderBreadcrumb() {
+      const nav = document.getElementById("breadcrumb");
+      if (!baseTree) {
+        nav.innerHTML = "";
+        return;
+      }
+      const chain = [];
+      function walkUp(path) {
+        if (path === "") {
+          chain.unshift(baseTree);
+          return;
+        }
+        walkUp(path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "");
+        chain.push(findNode(baseTree, path));
+      }
+      walkUp(viewPath);
+      nav.innerHTML = chain
+        .filter(Boolean)
+        .map((n, i) => {
+          const isLast = i === chain.length - 1;
+          const label = n.path === "" ? projectLabel : `${ICON_DIR} ${n.name}`;
+          if (isLast) return `<span class="text-zinc-200">${label}</span>`;
+          return `<button type="button" data-path="${n.path}" class="text-violet-400 hover:underline">${label}</button><span class="text-zinc-600">/</span>`;
+        })
+        .join("");
+      nav.querySelectorAll("button").forEach((btn) => {
+        btn.onclick = () => {
+          viewPath = btn.dataset.path;
+          render();
+        };
+      });
+    }
+
+    function closePreview() {
+      previewPath = "";
+      const pop = document.getElementById("preview-popover");
+      if (pop) pop.classList.add("hidden");
+    }
+
+    async function openPreview(path, label) {
+      previewPath = path || "";
+      const pop = document.getElementById("preview-popover");
+      const titleEl = document.getElementById("preview-title");
+      const subtitleEl = document.getElementById("preview-subtitle");
+      const bodyEl = document.getElementById("preview-body");
+      if (!pop || !titleEl || !subtitleEl || !bodyEl || !previewPath) return;
+
+      titleEl.textContent = label || previewPath.split("/").pop() || previewPath;
+      subtitleEl.textContent = previewPath;
+      bodyEl.textContent = "Loading preview…";
+      pop.classList.remove("hidden");
+
+      try {
+        const resp = await fetch(
+          `/preview?path=${encodeURIComponent(normPath(previewPath))}`
+        );
+        if (!resp.ok) {
+          bodyEl.textContent = `Unable to load preview (HTTP ${resp.status}).`;
+          return;
+        }
+        const text = await resp.text();
+        bodyEl.textContent = text || "[File is empty]";
+      } catch (err) {
+        bodyEl.textContent = "Error loading preview.";
+      }
+    }
+
+    function render() {
+      expireFlashes();
+
+      if (!baseTree) {
+        ensureChart();
+        svg
+          .append("text")
+          .attr("x", width / 2)
+          .attr("y", height / 2)
+          .attr("text-anchor", "middle")
+          .attr("fill", "#71717a")
+          .text("Waiting for project index from OpenCode plugin…");
+        return;
+      }
+
+      const viewNode = findNode(baseTree, viewPath) || baseTree;
+      applyFlashing(viewNode);
+      const data = cloneNode(viewNode);
+      applyFlashing(data);
+
+      const root = d3
+        .hierarchy(data)
+        .sum((d) => (d.type === "file" ? 1 : 0))
+        .sort((a, b) => b.value - a.value);
+
+      d3.treemap()
+        .tile(d3.treemapSquarify)
+        .size([width, height])
+        .paddingOuter(3)
+        .paddingTop((d) => paddingTopFor(d))
+        .paddingInner(2)
+        .round(true)(root);
+
+      const nodes = root.descendants().filter((d) => d.depth > 0);
+      ensureChart();
+
+      if (nodes.length === 0) {
+        svg
+          .append("text")
+          .attr("x", width / 2)
+          .attr("y", height / 2)
+          .attr("text-anchor", "middle")
+          .attr("fill", "#71717a")
+          .text("No files in this folder — use breadcrumb to go up.");
+        renderBreadcrumb();
+        return;
+      }
+
+      const cell = cellLayer
+        .selectAll("g.cell")
+        .data(nodes, (d) => d.data.path)
+        .join("g")
+        .attr("class", "cell")
+        .attr("transform", (d) => `translate(${d.x0},${d.y0})`);
+
+      cell
+        .append("rect")
+        .attr("class", "body")
+        .attr("width", (d) => Math.max(0, d.x1 - d.x0))
+        .attr("height", (d) => Math.max(0, d.y1 - d.y0))
+        .attr("fill", (d) => fillColor(d))
+        .attr("stroke", "#09090b")
+        .attr("stroke-width", 1)
+        .style("cursor", (d) => (d.children ? "pointer" : "text"))
+        .lower()
+        .on("click", (event, d) => {
+          event.stopPropagation();
+          if (d.children) {
+            viewPath = d.data.path;
+            render();
+          } else if (d.data.path) {
+            openPreview(d.data.path, d.data.name);
+          }
+        });
+
+      cell.each(function (d) {
+        const g = d3.select(this);
+        const w = d.x1 - d.x0;
+        const h = d.y1 - d.y0;
+        const barH = titleBarHeight(d);
+        if (barH < 10 || w < 20) return;
+
+        const isDir = !!d.children;
+        const showActionLabel = d.data.flashing && d.data.action;
+
+        if (isDir || showActionLabel) {
+          g.append("rect")
+            .attr("class", "titlebar")
+            .attr("width", w)
+            .attr("height", barH)
+            .attr("fill", isDir ? "#0c0c0e" : "rgba(0,0,0,0.5)")
+            .attr("stroke", showActionLabel ? "#fff" : "none")
+            .attr("stroke-width", showActionLabel ? 1.5 : 0);
+        }
+
+        if (isDir) {
+          g.append("text")
+            .attr("x", 6)
+            .attr("y", barH / 2)
+            .attr("dominant-baseline", "middle")
+            .attr("fill", d.data.visited ? "#e4e4e7" : "#a1a1aa")
+            .attr("font-size", Math.min(12, barH - 4))
+            .attr("font-family", "ui-monospace, monospace")
+            .attr("font-weight", 600)
+            .text(() => {
+              const label = displayName(d);
+              const max = Math.max(4, Math.floor((w - (showActionLabel ? 52 : 12)) / 7));
+              return label.length > max ? label.slice(0, max - 1) + "…" : label;
+            });
+          if (showActionLabel) {
+            g.append("text")
+              .attr("x", w - 6)
+              .attr("y", barH / 2)
+              .attr("text-anchor", "end")
+              .attr("dominant-baseline", "middle")
+              .attr("fill", "#fff")
+              .attr("font-size", Math.min(10, barH - 2))
+              .attr("font-weight", 800)
+              .text(String(d.data.action).toUpperCase());
+          }
+        } else if (showActionLabel) {
+          g.append("text")
+            .attr("x", w / 2)
+            .attr("y", barH / 2)
+            .attr("text-anchor", "middle")
+            .attr("dominant-baseline", "middle")
+            .attr("fill", "#fff")
+            .attr("font-size", Math.min(11, barH - 2))
+            .attr("font-weight", 800)
+            .text(String(d.data.action).toUpperCase());
+        }
+      });
+
+      labelLayer
+        .selectAll("g.file-label")
+        .data(
+          nodes.filter((d) => !d.children && d.y1 - d.y0 > TITLE_BAR + 14),
+          (d) => d.data.path + "-lbl"
+        )
+        .join("g")
+        .attr("class", "file-label")
+        .attr("transform", (d) => `translate(${d.x0},${d.y0})`)
+        .each(function (d) {
+          const g = d3.select(this);
+          const w = d.x1 - d.x0;
+          const h = d.y1 - d.y0;
+          const top = titleBarHeight(d);
+          g.selectAll("text").remove();
+          if (w < 36) return;
+          g.append("text")
+            .attr("x", 6)
+            .attr("y", top + (h - top) / 2)
+            .attr("dominant-baseline", "middle")
+            .attr("fill", d.data.visited ? "#d4d4d8" : "#a1a1aa")
+            .attr("font-size", Math.min(11, (h - top) / 2))
+            .attr("font-family", "ui-monospace, monospace")
+            .text(() => {
+              const label = displayName(d);
+              const max = Math.max(4, Math.floor((w - 12) / 6));
+              return label.length > max ? label.slice(0, max - 1) + "…" : label;
+            });
+        });
+
+      drawWriteSpinner(nodes);
+      renderBreadcrumb();
+    }
+
+    function applyMessage(data) {
+      if (data.type === "agent_status") {
+        const phase = data.phase;
+        const msg = data.message || phase;
+        if (data.prompt) {
+          lastPrompt = data.prompt;
+          updatePromptLine(lastPrompt);
+        }
+        if (phase === "prompt_submitted") {
+          lastSummary = "";
+          updateSummaryLine("");
+          applyPromptSubmittedReset(data);
+          setRunStatus(msg, "working");
+        } else if (phase === "working") {
+          setRunStatus(msg, "working");
+        } else if (phase === "complete" || phase === "idle") {
+          if (data.summary) {
+            lastSummary = data.summary;
+            updateSummaryLine(lastSummary);
+          }
+          setRunStatus(msg, phase === "complete" ? "complete" : "idle");
+        } else {
+          setRunStatus(msg, "muted");
+        }
+        return;
+      }
+
+      if (data.type === "file_progress") {
+        const p = normPath(data.path);
+        if (data.active) inProgressPath = p;
+        else if (p === normPath(inProgressPath)) inProgressPath = null;
+        render();
+        return;
+      }
+
+      if (data.type === "status") {
+        if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
+        if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
+        if (data.status === "session_idle") {
+          if (data.summary) {
+            lastSummary = data.summary;
+            updateSummaryLine(lastSummary);
+          }
+          setRunStatus(
+            data.summary ? `~ Done — ${data.summary}` : "Prompt complete — agent idle",
+            "complete"
+          );
+        }
+        return;
+      }
+
+      if (data.type === "session_reset") {
+        applySessionReset(data);
+        return;
+      }
+
+      if (data.type === "project_index" && data.tree) {
+        indexSnapshot = cloneNode(data.tree);
+        baseTree = cloneNode(data.tree);
+        hasFullIndex = true;
+        flashes.clear();
+        projectLabel = data.projectLabel || data.tree.name || "project";
+        viewPath = "";
+        const meta = data.indexMeta;
+        setBadge(
+          "status-index",
+          meta?.truncated ? `Index: ${meta.entryCount}+` : `Index: ${meta.entryCount ?? "ok"}`,
+          "ok"
+        );
+        setRunStatus(`~ Project indexed — gray = untouched (${projectLabel})`, "ok");
+        render();
+        return;
+      }
+
+      if (data.tree) {
+        if (data.type === "update" && data.resetSeq != null && data.resetSeq < resetSeq) {
+          return;
+        }
+        if (!baseTree) {
+          baseTree = cloneNode(data.tree);
+          projectLabel = data.projectLabel || data.tree.name || projectLabel;
+        } else if (data.type === "update") {
+          mergeActivityIntoBase(baseTree, data.tree);
+        }
+        render();
+      }
+    }
+
+    const ws = new WebSocket(`ws://${location.hostname}:8765`);
+
+    ws.onopen = () => {
+      setBadge("status-browser", "Browser: connected", "ok");
+      setRunStatus("Connected — waiting for plugin state…", "muted");
+      render();
+    };
+    ws.onclose = () => {
+      setBadge("status-browser", "Browser: disconnected", "bad");
+      setRunStatus("Disconnected from monitor server", "bad");
+    };
+    ws.onerror = () => setBadge("status-browser", "Browser: error", "bad");
+
+    ws.onmessage = (event) => applyMessage(JSON.parse(event.data));
+
+    document.getElementById("preview-close")?.addEventListener("click", () => {
+      closePreview();
+    });
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closePreview();
+    });
+
+    window.addEventListener("resize", () => render());
+    setInterval(() => {
+      let needsRender = false;
+      if (flashes.size > 0) {
+        expireFlashes();
+        needsRender = true;
+      }
+      if (inProgressPath) needsRender = true;
+      if (needsRender) render();
+    }, 200);
+  </script>
+</body>
+</html>

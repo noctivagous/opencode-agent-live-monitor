@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Monitor — Horizon</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
+    body { display: flex; flex-direction: column; }
+    #horizon-scroll { flex: 1; min-h-0; overflow: auto; }
+    #horizon-chart svg { display: block; }
+    .dir-label { fill: #a78bfa; font-weight: 600; }
+    .file-label { fill: #a1a1aa; }
+    .axis text { fill: #71717a; font-size: 12px; }
+    .axis line, .axis path { stroke: #3f3f46; }
+    .prompt-marker { pointer-events: none; }
+    .prompt-marker-label {
+      font-size: 9px;
+      font-family: ui-monospace, monospace;
+      font-weight: 600;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body class="text-zinc-200">
+  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-2 text-sm">
+    <div class="flex flex-wrap items-center gap-3">
+      <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
+      <span class="font-semibold">Activity Horizon</span>
+      <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Browser…</span>
+      <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Plugin…</span>
+      <span id="status-prompt" class="text-xs text-zinc-500">Waiting for prompt…</span>
+      <span id="status-stats" class="text-xs text-zinc-500">—</span>
+      <span class="ml-auto flex flex-wrap items-center gap-2" id="legend"></span>
+    </div>
+  </header>
+  <div id="horizon-scroll">
+    <div id="horizon-chart"></div>
+  </div>
+
+  <script>
+    const SCALE = 1.2;
+    const BUCKET_MS = 1000;
+    const MAX_FILES = 80;
+    const MIN_PROMPT_SPAN_MS = 8000;
+    const GUTTER = Math.round(200 * SCALE);
+    const ROW_H = Math.round(22 * SCALE);
+    const DIR_ROW_H = Math.round(18 * SCALE);
+    const MARGIN_TOP = Math.round(28 * SCALE);
+    const MARGIN_RIGHT = Math.round(16 * SCALE);
+
+    const ACTION_COLORS = {
+      read: "#2563eb",
+      edit: "#16a34a",
+      list: "#7c3aed",
+      glob: "#9333ea",
+      grep: "#a855f7",
+      write: "#ca8a04",
+      bash: "#ca8a04",
+    };
+
+    const events = [];
+    const fileMeta = new Map();
+
+    /** idle | running | frozen */
+    let promptPhase = "idle";
+    let promptStartAt = null;
+    let promptEndAt = null;
+
+    function setBadge(id, text, tone) {
+      const tones = {
+        ok: "bg-emerald-950 text-emerald-300",
+        warn: "bg-amber-950 text-amber-300",
+        bad: "bg-red-950 text-red-300",
+        idle: "bg-zinc-800 text-zinc-400",
+      };
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    }
+
+    function normPath(p) {
+      return (p || "").replace(/\\/g, "/");
+    }
+
+    function timelineEnd() {
+      if (promptPhase === "frozen" && promptEndAt != null) return promptEndAt;
+      if (promptPhase === "running") return Date.now();
+      return Date.now();
+    }
+
+    function timeRange() {
+      if (promptStartAt == null) return null;
+      const end = timelineEnd();
+      let start = promptStartAt;
+      if (end - start < MIN_PROMPT_SPAN_MS) {
+        start = end - MIN_PROMPT_SPAN_MS;
+      }
+      return [start, end];
+    }
+
+    function updatePromptStatus() {
+      const el = document.getElementById("status-prompt");
+      if (promptPhase === "idle") {
+        el.textContent = "Waiting for prompt…";
+        el.className = "text-xs text-zinc-500";
+        return;
+      }
+      if (promptPhase === "running") {
+        el.textContent = "Prompt running — timeline live";
+        el.className = "text-xs text-violet-300";
+        return;
+      }
+      el.textContent = "Prompt complete — timeline frozen";
+      el.className = "text-xs text-sky-400";
+    }
+
+    function beginPrompt(at) {
+      events.length = 0;
+      fileMeta.clear();
+      promptStartAt = at ?? Date.now();
+      promptEndAt = null;
+      promptPhase = "running";
+      updatePromptStatus();
+      render();
+    }
+
+    function endPrompt(at) {
+      if (promptPhase !== "running" || promptStartAt == null) return;
+      promptEndAt = at ?? Date.now();
+      if (promptEndAt < promptStartAt) promptEndAt = promptStartAt + 1;
+      promptPhase = "frozen";
+      updatePromptStatus();
+      render();
+    }
+
+    function pruneEvents() {
+      const range = timeRange();
+      if (!range) return;
+      const [t0, t1] = range;
+      while (events.length && events[0].at < t0) events.shift();
+      while (events.length && events[events.length - 1].at > t1) events.pop();
+    }
+
+    function ingestEvent(ev) {
+      if (promptPhase === "frozen" || promptPhase === "idle") return;
+      const path = normPath(ev.path);
+      if (!path) return;
+      const at = ev.at || Date.now();
+      if (promptStartAt != null && at < promptStartAt) return;
+      const action = ev.action || "read";
+      const dir =
+        ev.dir != null
+          ? normPath(ev.dir)
+          : path.includes("/")
+            ? path.slice(0, path.lastIndexOf("/"))
+            : "";
+      const name = ev.name || path.split("/").pop() || path;
+      events.push({ path, dir, name, action, at });
+      fileMeta.set(path, { dir, name, lastAt: at });
+      while (events.length > 800) events.shift();
+      const paths = [...fileMeta.entries()].sort((a, b) => b[1].lastAt - a[1].lastAt);
+      if (paths.length > MAX_FILES) {
+        const drop = new Set(paths.slice(MAX_FILES).map(([p]) => p));
+        for (let i = events.length - 1; i >= 0; i--) {
+          if (drop.has(events[i].path)) events.splice(i, 1);
+        }
+        for (const p of drop) fileMeta.delete(p);
+      }
+    }
+
+    function buildRows() {
+      const byDir = new Map();
+      for (const [path, meta] of fileMeta) {
+        const dir = meta.dir || "";
+        if (!byDir.has(dir)) byDir.set(dir, []);
+        byDir.get(dir).push({ path, name: meta.name, lastAt: meta.lastAt });
+      }
+      const dirs = [...byDir.keys()].sort((a, b) => {
+        const la = Math.max(...byDir.get(a).map((f) => f.lastAt));
+        const lb = Math.max(...byDir.get(b).map((f) => f.lastAt));
+        return lb - la;
+      });
+      const rows = [];
+      for (const dir of dirs) {
+        const files = byDir.get(dir).sort((a, b) => b.lastAt - a.lastAt);
+        rows.push({ type: "dir", key: `dir:${dir}`, label: dir ? `${dir}/` : "(root)/", dir });
+        for (const f of files) {
+          rows.push({ type: "file", key: f.path, path: f.path, label: f.name, dir });
+        }
+      }
+      return rows;
+    }
+
+    function binsForFile(path, t0, t1) {
+      const n = Math.max(1, Math.ceil((t1 - t0) / BUCKET_MS));
+      const bins = Array.from({ length: n }, () => ({}));
+      for (const ev of events) {
+        if (ev.path !== path) continue;
+        const idx = Math.floor((ev.at - t0) / BUCKET_MS);
+        if (idx < 0 || idx >= n) continue;
+        bins[idx][ev.action] = (bins[idx][ev.action] || 0) + 1;
+      }
+      return bins;
+    }
+
+    function drawHorizonRow(g, rowY, rowH, path, x, t0, t1) {
+      const bins = binsForFile(path, t0, t1);
+      const mid = rowY + rowH / 2;
+      const h = rowH / 2 - 1;
+      const bw = Math.max(1, x(t0 + BUCKET_MS) - x(t0) - 0.5);
+
+      bins.forEach((counts, i) => {
+        const actions = Object.entries(counts);
+        if (!actions.length) return;
+        const bx = x(t0 + i * BUCKET_MS);
+        let stack = 0;
+        for (const [action, count] of actions) {
+          const color = ACTION_COLORS[action] || "#6366f1";
+          const intensity = Math.min(1, 0.35 + count * 0.25);
+          const bh = (h * intensity) / actions.length;
+          g.append("rect")
+            .attr("x", bx)
+            .attr("y", mid - stack - bh)
+            .attr("width", bw)
+            .attr("height", bh)
+            .attr("fill", color)
+            .attr("opacity", 0.85);
+          g.append("rect")
+            .attr("x", bx)
+            .attr("y", mid + stack)
+            .attr("width", bw)
+            .attr("height", bh)
+            .attr("fill", color)
+            .attr("opacity", 0.55);
+          stack += bh;
+        }
+      });
+    }
+
+    function drawPromptMarker(g, x, time, yTop, yBottom, kind) {
+      if (time == null) return;
+      const px = x(time);
+      const isStart = kind === "start";
+      const stroke = isStart ? "#a78bfa" : "#38bdf8";
+      g.append("line")
+        .attr("class", `prompt-marker prompt-${kind}`)
+        .attr("x1", px)
+        .attr("x2", px)
+        .attr("y1", yTop)
+        .attr("y2", yBottom)
+        .attr("stroke", stroke)
+        .attr("stroke-width", 2)
+        .attr("opacity", 0.95);
+      g.append("text")
+        .attr("class", "prompt-marker-label")
+        .attr("x", px + 4)
+        .attr("y", yTop + 10)
+        .attr("fill", stroke)
+        .text(isStart ? "Prompt start" : "Prompt complete");
+    }
+
+    function render() {
+      if (promptPhase !== "idle") pruneEvents();
+
+      const scrollEl = document.getElementById("horizon-scroll");
+      const chartEl = document.getElementById("horizon-chart");
+      const range = timeRange();
+
+      chartEl.innerHTML = "";
+
+      if (promptPhase === "idle" || !range) {
+        chartEl.innerHTML =
+          '<p class="text-zinc-500 text-sm text-center py-16">Waiting for a new prompt. Activity for each prompt is shown from start to complete.</p>';
+        document.getElementById("status-stats").textContent = "—";
+        return;
+      }
+
+      const rows = buildRows();
+      const [t0, t1] = range;
+      const cw = scrollEl.clientWidth || 800;
+      const chartW = Math.max(400, cw - GUTTER - MARGIN_RIGHT);
+      const svgW = cw;
+      const totalH =
+        MARGIN_TOP +
+        rows.reduce((s, r) => s + (r.type === "dir" ? DIR_ROW_H : ROW_H), 0) +
+        Math.round(16 * SCALE);
+      const chartBottom = Math.max(MARGIN_TOP + 40, totalH);
+
+      const svg = d3
+        .select("#horizon-chart")
+        .append("svg")
+        .attr("width", svgW)
+        .attr("height", Math.max(scrollEl.clientHeight || 300, totalH));
+
+      const x = d3.scaleTime().domain([t0, t1]).range([GUTTER, GUTTER + chartW]);
+      const g = svg.append("g");
+
+      g.append("g")
+        .attr("class", "axis")
+        .attr("transform", `translate(0,${MARGIN_TOP - 8})`)
+        .call(d3.axisTop(x).ticks(6).tickFormat(d3.timeFormat("%H:%M:%S")));
+
+      drawPromptMarker(g, x, promptStartAt, MARGIN_TOP, chartBottom, "start");
+      if (promptPhase === "frozen" && promptEndAt != null) {
+        drawPromptMarker(g, x, promptEndAt, MARGIN_TOP, chartBottom, "end");
+      }
+
+      let y = MARGIN_TOP;
+      if (!rows.length) {
+        g.append("text")
+          .attr("x", GUTTER + chartW / 2)
+          .attr("y", y + 24)
+          .attr("text-anchor", "middle")
+          .attr("fill", "#71717a")
+          .attr("font-size", 12)
+          .text("No file activity yet for this prompt.");
+      }
+
+      for (const row of rows) {
+        const rh = row.type === "dir" ? DIR_ROW_H : ROW_H;
+        g.append("text")
+          .attr("class", row.type === "dir" ? "dir-label" : "file-label")
+          .attr("x", row.type === "dir" ? 8 : 20)
+          .attr("y", y + rh / 2)
+          .attr("dominant-baseline", "middle")
+          .attr("font-size", row.type === "dir" ? Math.round(11 * SCALE) : Math.round(10 * SCALE))
+          .attr("font-family", "ui-monospace, monospace")
+          .text(() => {
+            const max = row.type === "dir" ? 28 : 24;
+            return row.label.length > max ? row.label.slice(0, max - 1) + "…" : row.label;
+          });
+
+        if (row.type === "file") {
+          g.append("line")
+            .attr("x1", GUTTER)
+            .attr("x2", GUTTER + chartW)
+            .attr("y1", y + rh / 2)
+            .attr("y2", y + rh / 2)
+            .attr("stroke", "#27272a")
+            .attr("stroke-width", 1);
+          drawHorizonRow(g, y, rh, row.path, x, t0, t1);
+        } else {
+          g.append("rect")
+            .attr("x", 0)
+            .attr("y", y)
+            .attr("width", svgW)
+            .attr("height", rh)
+            .attr("fill", "#18181b")
+            .attr("opacity", 0.5);
+        }
+        y += rh;
+      }
+
+      const durSec = Math.round((t1 - t0) / 1000);
+      const phaseLabel = promptPhase === "frozen" ? "frozen" : "live";
+      document.getElementById("status-stats").textContent =
+        `${events.length} events · ${fileMeta.size} files · ${durSec}s · ${phaseLabel}`;
+    }
+
+    const LEGEND_FONT_PX = Math.round(10 * SCALE);
+    const LEGEND_SWATCH_PX = Math.round(8 * SCALE);
+
+    function initLegend() {
+      const el = document.getElementById("legend");
+      el.innerHTML = Object.entries(ACTION_COLORS)
+        .filter(([k]) => k !== "bash")
+        .map(
+          ([k, c]) =>
+            `<span class="flex items-center gap-1.5" style="font-size:${LEGEND_FONT_PX}px;line-height:1.2">` +
+            `<span class="inline-block rounded-sm shrink-0" style="background:${c};width:${LEGEND_SWATCH_PX}px;height:${LEGEND_SWATCH_PX}px"></span>` +
+            `${k}</span>`
+        )
+        .join("");
+    }
+
+    function handleAgentStatus(data) {
+      const phase = data.phase;
+      const at = data.at ?? Date.now();
+      if (phase === "prompt_submitted") {
+        beginPrompt(at);
+        return;
+      }
+      if (phase === "complete" || phase === "idle") {
+        endPrompt(at);
+      }
+    }
+
+    function applyMessage(data) {
+      if (data.type === "agent_status") {
+        handleAgentStatus(data);
+        return;
+      }
+
+      if (data.type === "activity_event") {
+        ingestEvent(data);
+        render();
+        return;
+      }
+
+      if (data.type === "activity_batch" && Array.isArray(data.events)) {
+        if (promptPhase === "running") {
+          for (const ev of data.events) ingestEvent(ev);
+          render();
+        }
+        return;
+      }
+
+      if (data.type === "session_reset") {
+        beginPrompt(data.at ?? Date.now());
+        return;
+      }
+
+      if (data.type === "status") {
+        if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
+        if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
+        if (data.status === "session_idle") {
+          endPrompt(data.at ?? Date.now());
+        }
+      }
+    }
+
+    initLegend();
+    updatePromptStatus();
+
+    const ws = new WebSocket(`ws://${location.hostname}:8765`);
+    ws.onopen = () => setBadge("status-browser", "Browser: connected", "ok");
+    ws.onclose = () => setBadge("status-browser", "Browser: disconnected", "bad");
+    ws.onerror = () => setBadge("status-browser", "Browser: error", "bad");
+    ws.onmessage = (e) => applyMessage(JSON.parse(e.data));
+
+    setInterval(() => {
+      if (promptPhase === "running") render();
+    }, 1000);
+
+    window.addEventListener("resize", () => render());
+    render();
+  </script>
+</body>
+</html>

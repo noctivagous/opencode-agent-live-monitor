@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Monitor — Radial</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="/monitor-tree.js"></script>
+  <script src="/monitor-highlights.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
+    body { display: flex; flex-direction: column; }
+    .link { fill: none; stroke: #475569; stroke-opacity: 0.6; }
+    .node circle { cursor: pointer; }
+    .node text { font-size: 9px; font-family: ui-monospace, monospace; pointer-events: none; }
+    .node .active-ring { fill: none; pointer-events: none; }
+  </style>
+</head>
+<body class="text-zinc-200">
+  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-2 text-sm flex flex-wrap items-center gap-3">
+    <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
+    <span class="font-semibold">Radial Cluster</span>
+    <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Browser…</span>
+    <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Plugin…</span>
+    <span id="project-root-label" class="text-xs text-zinc-500 font-mono truncate max-w-md" title="">—</span>
+    <span class="ml-auto text-xs text-zinc-600">Full index on connect · click folder to collapse</span>
+  </header>
+  <div id="radial-chart" class="flex-1 min-h-0 overflow-hidden flex items-center justify-center"></div>
+
+  <script>
+    const { cloneTree, createTreeApi } = MonitorTree;
+    const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
+    const userCollapsed = new Set();
+    const treeApi = createTreeApi(userCollapsed);
+    const highlights = createHighlightStore();
+
+    let treeState = null;
+    let indexSnapshot = null;
+    let hasFullIndex = false;
+    let monitorResetSeq = 0;
+    let focusPath = null;
+    let inProgressPath = null;
+
+    const ICON_DIR = "\u{1F4C1}";
+    const ICON_FILE = "\u{1F4C4}";
+    const UNTOUCHED = "#52525b";
+    const VISITED_MUTED = "#71717a";
+
+    function setBadge(id, text, tone) {
+      const tones = {
+        ok: "bg-emerald-950 text-emerald-300",
+        warn: "bg-amber-950 text-amber-300",
+        bad: "bg-red-950 text-red-300",
+        idle: "bg-zinc-800 text-zinc-400",
+      };
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    }
+
+    function nodeActiveAction(data) {
+      return (
+        highlights.getAction(data.path) ||
+        (data.path === inProgressPath ? "write" : null) ||
+        (data.action && data.visited ? data.action : null)
+      );
+    }
+
+    function nodeFill(d) {
+      const n = d.data;
+      const active = nodeActiveAction(n);
+      if (active && ACTION_COLORS[active]) return ACTION_COLORS[active];
+      if (!n.visited) return UNTOUCHED;
+      if (n.action && ACTION_COLORS[n.action]) return ACTION_COLORS[n.action];
+      return VISITED_MUTED;
+    }
+
+    function renderRadial(rootNode) {
+      if (!rootNode) return;
+      const el = document.getElementById("radial-chart");
+      el.innerHTML = "";
+
+      const width = el.clientWidth || 600;
+      const height = el.clientHeight || 600;
+      const radius = Math.min(width, height) / 2 - 40;
+
+      const hierarchyFn = hasFullIndex
+        ? (n) => treeApi.toHierarchyIndexed(n, focusPath)
+        : (n) => treeApi.toHierarchy(n, focusPath);
+      const root = d3.hierarchy(hierarchyFn(rootNode));
+      d3.cluster().size([2 * Math.PI, radius]).separation((a, b) =>
+        a.parent === b.parent ? 1 : 2 / a.depth
+      )(root);
+
+      const svg = d3
+        .select("#radial-chart")
+        .append("svg")
+        .attr("width", width)
+        .attr("height", height)
+        .attr("viewBox", [-width / 2, -height / 2, width, height]);
+
+      const g = svg.append("g");
+
+      g.append("g")
+        .selectAll("path")
+        .data(root.links())
+        .join("path")
+        .attr("class", "link")
+        .attr(
+          "d",
+          d3
+            .linkRadial()
+            .angle((d) => d.x)
+            .radius((d) => d.y)
+        );
+
+      const node = g
+        .append("g")
+        .selectAll("g")
+        .data(root.descendants())
+        .join("g")
+        .attr(
+          "transform",
+          (d) => `rotate(${(d.x * 180) / Math.PI - 90}) translate(${d.y},0)`
+        );
+
+      node.each(function (d) {
+        const sel = d3.select(this);
+        const isDir = d.data.type === "dir";
+        const activeAction = nodeActiveAction(d.data);
+        const strokeColor = activeAction ? ACTION_COLORS[activeAction] || "#a78bfa" : null;
+        const onLeft = d.x < Math.PI;
+
+        if (strokeColor) {
+          sel
+            .append("ellipse")
+            .attr("class", "active-ring")
+            .attr("cx", onLeft ? 14 : -14)
+            .attr("cy", 0)
+            .attr("rx", isDir ? 42 : 36)
+            .attr("ry", 10)
+            .attr("stroke", strokeColor)
+            .attr("stroke-width", 2);
+        }
+
+        sel
+          .append("circle")
+          .attr("r", (d) => (d.children ? 4 : 3))
+          .attr("fill", nodeFill)
+          .attr("stroke", strokeColor || "#09090b")
+          .attr("stroke-width", strokeColor ? 1.5 : 0.5)
+          .style("cursor", (d) => (d.data.type === "dir" ? "pointer" : "default"))
+          .on("click", (event, d) => {
+            event.stopPropagation();
+            if (d.data.type === "dir") {
+              const key = d.data.path;
+              if (userCollapsed.has(key)) userCollapsed.delete(key);
+              else userCollapsed.add(key);
+              renderRadial(treeState);
+            }
+          });
+
+        const icon = isDir ? ICON_DIR : ICON_FILE;
+        const chevron = isDir ? (d.children ? "\u25BE " : "\u25B8 ") : "";
+        const name =
+          d.data.name.length > 16 ? d.data.name.slice(0, 14) + "…" : d.data.name;
+
+        sel
+          .append("text")
+          .attr("class", "node-icon")
+          .attr("dy", "0.31em")
+          .attr("x", onLeft ? 6 : -6)
+          .attr("text-anchor", onLeft ? "start" : "end")
+          .attr("transform", onLeft ? null : "rotate(180)")
+          .attr("font-size", "10px")
+          .text(icon);
+
+        sel
+          .append("text")
+          .attr("class", "node-label")
+          .attr("dy", "0.31em")
+          .attr("x", onLeft ? 20 : -20)
+          .attr("text-anchor", onLeft ? "start" : "end")
+          .attr("transform", onLeft ? null : "rotate(180)")
+          .attr("fill", d.data.visited ? "#e4e4e7" : "#a1a1aa")
+          .attr("font-size", "9px")
+          .attr("font-family", "ui-monospace, monospace")
+          .text(isDir ? chevron + name : name);
+      });
+    }
+
+    function syncHighlightsFromPayload(data) {
+      if (data.activeFiles?.length) {
+        for (const f of data.activeFiles) {
+          if (f.path && f.action) highlights.stamp(f.path, f.action);
+        }
+      }
+      if (data.tree) highlights.stampFromTree(data.tree);
+    }
+
+    function applyPayload(data) {
+      if (data.type === "file_progress") {
+        const p = MonitorHighlights.normPath(data.path);
+        if (data.active) inProgressPath = p;
+        else if (p === inProgressPath) inProgressPath = null;
+        if (treeState) renderRadial(treeState);
+        return;
+      }
+
+      if (data.type === "activity_event") {
+        highlights.stamp(data.path, data.action);
+        if (treeState) renderRadial(treeState);
+        return;
+      }
+
+      if (data.type === "session_reset") {
+        if (data.resetSeq != null) monitorResetSeq = data.resetSeq;
+        focusPath = null;
+        inProgressPath = null;
+        highlights.clear();
+        if (data.tree) treeState = cloneTree(data.tree);
+        else if (indexSnapshot) treeState = cloneTree(indexSnapshot);
+        hasFullIndex = !!indexSnapshot;
+        if (treeState) renderRadial(treeState);
+        return;
+      }
+
+      if (data.type === "project_index" && data.tree) {
+        indexSnapshot = cloneTree(data.tree);
+        treeState = cloneTree(data.tree);
+        hasFullIndex = true;
+        highlights.clear();
+        renderRadial(treeState);
+        return;
+      }
+
+      if (data.projectRoot || data.projectLabel) {
+        const el = document.getElementById("project-root-label");
+        el.textContent = data.projectRoot || data.projectLabel;
+        el.title = data.projectRoot || "";
+      }
+
+      if (data.activeFiles?.length) {
+        focusPath = data.activeFiles[0].path;
+        syncHighlightsFromPayload(data);
+      }
+
+      if (data.tree && data.type === "update") {
+        if (data.resetSeq != null && data.resetSeq < monitorResetSeq) return;
+        if (data.resetSeq != null) monitorResetSeq = data.resetSeq;
+        if (!treeState && indexSnapshot) treeState = cloneTree(indexSnapshot);
+        if (treeState) {
+          treeApi.mergeActivityTree(treeState, data.tree);
+          treeApi.expandVisitedAncestors(treeState);
+        } else {
+          treeState = cloneTree(data.tree);
+        }
+        syncHighlightsFromPayload(data);
+        renderRadial(treeState);
+      } else if (data.tree) {
+        treeState = cloneTree(data.tree);
+        syncHighlightsFromPayload(data);
+        renderRadial(treeState);
+      }
+    }
+
+    const ws = new WebSocket(`ws://${location.hostname}:8765`);
+    ws.onopen = () => setBadge("status-browser", "Browser: connected", "ok");
+    ws.onclose = () => setBadge("status-browser", "Browser: disconnected", "bad");
+    ws.onerror = () => setBadge("status-browser", "Browser: error", "bad");
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "status") {
+        if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
+        if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
+        return;
+      }
+      applyPayload(data);
+    };
+
+    let resizeTimer;
+    new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (treeState) renderRadial(treeState);
+      }, 80);
+    }).observe(document.getElementById("radial-chart"));
+  </script>
+</body>
+</html>

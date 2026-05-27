@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Monitor — Tree</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="/monitor-tree.js"></script>
+  <script src="/monitor-highlights.js"></script>
+  <style>
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #09090b; }
+    body { display: flex; flex-direction: column; }
+    .node { cursor: pointer; }
+    .node text { font-size: 11px; font-family: ui-monospace, monospace; pointer-events: none; }
+    .node .dir-capsule { stroke-width: 1.25; }
+    .node .active-capsule { fill: none; stroke-width: 2; pointer-events: none; }
+    .link { fill: none; stroke: #475569; stroke-width: 1.5px; }
+    #tree-chart {
+      flex: 1;
+      min-height: 0;
+      min-width: 0;
+      overflow: hidden;
+      cursor: grab;
+    }
+    #tree-chart:active { cursor: grabbing; }
+    #tree-chart-inner svg { display: block; }
+  </style>
+</head>
+<body class="text-zinc-200">
+  <header class="flex-shrink-0 border-b border-zinc-800 bg-zinc-950 px-4 py-2 text-sm flex flex-wrap items-center gap-3">
+    <a href="/" class="text-zinc-500 hover:text-zinc-300 text-xs">Dashboard</a>
+    <span class="font-semibold">Project Tree</span>
+    <span id="status-browser" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Browser…</span>
+    <span id="status-plugin" class="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">Plugin…</span>
+    <span id="project-root-label" class="text-xs text-zinc-500 font-mono truncate max-w-md" title="">—</span>
+    <span class="ml-auto text-xs text-zinc-600">Scroll/zoom · click folders to collapse</span>
+  </header>
+  <div id="tree-chart"><div id="tree-chart-inner"></div></div>
+
+  <script>
+    const { cloneTree, createTreeApi } = MonitorTree;
+    const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
+    const userCollapsed = new Set();
+    const treeApi = createTreeApi(userCollapsed);
+    const highlights = createHighlightStore();
+
+    let treeState = null;
+    let indexSnapshot = null;
+    let hasFullIndex = false;
+    let monitorResetSeq = 0;
+    let focusPath = null;
+    let inProgressPath = null;
+    let frameToActive = false;
+    let zoomBehavior = null;
+
+    const ICON_DIR = "\u{1F4C1}";
+    const ICON_FILE = "\u{1F4C4}";
+
+    function setBadge(id, text, tone) {
+      const tones = {
+        ok: "bg-emerald-950 text-emerald-300",
+        warn: "bg-amber-950 text-amber-300",
+        bad: "bg-red-950 text-red-300",
+        idle: "bg-zinc-800 text-zinc-400",
+      };
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = `rounded-full px-2 py-0.5 text-xs ${tones[tone] || tones.idle}`;
+    }
+
+    function nodeActiveAction(data) {
+      return (
+        highlights.getAction(data.path) ||
+        (data.path === inProgressPath ? "write" : null) ||
+        (data.action && data.visited ? data.action : null)
+      );
+    }
+
+    function appendActiveCapsule(sel, isDir, label, labelX, estLabelW) {
+      const capH = isDir ? 18 : 16;
+      const capW = estLabelW + 14;
+      sel
+        .insert("rect", ":first-child")
+        .attr("class", "active-capsule")
+        .attr("x", labelX - 8)
+        .attr("y", -capH / 2)
+        .attr("width", capW)
+        .attr("height", capH)
+        .attr("rx", capH / 2);
+    }
+
+    function frameActiveNodes(svg, descendants, container) {
+      const targets = descendants.filter((d) => nodeActiveAction(d.data) || d.data.isFocus);
+      if (!targets.length || !zoomBehavior) return;
+
+      const padX = 80;
+      const padY = 40;
+      const minX = d3.min(targets, (d) => d.y) + 16 - padX;
+      const maxX = d3.max(targets, (d) => d.y) + 16 + padX + 100;
+      const minY = d3.min(targets, (d) => d.x) + 16 - padY;
+      const maxY = d3.max(targets, (d) => d.x) + 16 + padY;
+
+      const cw = container.clientWidth || 400;
+      const ch = container.clientHeight || 400;
+      const dx = Math.max(maxX - minX, 80);
+      const dy = Math.max(maxY - minY, 60);
+      const scale = Math.min(2.5, Math.max(0.2, 0.88 / Math.max(dx / cw, dy / ch)));
+      const tx = cw / 2 - scale * ((minX + maxX) / 2);
+      const ty = ch / 2 - scale * ((minY + maxY) / 2);
+
+      svg
+        .transition()
+        .duration(450)
+        .call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+    }
+
+    function renderTree(rootNode) {
+      if (!rootNode) return;
+      const container = document.getElementById("tree-chart");
+      const inner = document.getElementById("tree-chart-inner");
+      inner.innerHTML = "";
+
+      const hierarchyFn = hasFullIndex
+        ? (n) => treeApi.toHierarchyIndexed(n, focusPath)
+        : (n) => treeApi.toHierarchy(n, focusPath);
+      const hierarchy = d3.hierarchy(hierarchyFn(rootNode));
+      const descendants = hierarchy.descendants();
+      const visible = descendants.length;
+
+      const maxDepth = d3.max(descendants, (d) => d.depth) || 0;
+      const cw = Math.max(320, container.clientWidth || 320);
+      const ch = Math.max(200, container.clientHeight || 200);
+      const width = Math.max(cw * 2, maxDepth * 220 + 280);
+      const height = Math.max(ch * 2, visible * 26 + 80);
+
+      const svg = d3.select("#tree-chart-inner").append("svg").attr("width", width).attr("height", height);
+      const zoomLayer = svg.append("g");
+      const g = zoomLayer.append("g").attr("transform", "translate(16,16)");
+      d3.tree().size([height - 32, width - 32])(hierarchy);
+
+      g.selectAll(".link")
+        .data(hierarchy.links())
+        .enter()
+        .append("path")
+        .attr("class", "link")
+        .attr("d", d3.linkHorizontal().x((d) => d.y).y((d) => d.x));
+
+      const node = g
+        .selectAll(".node")
+        .data(descendants)
+        .enter()
+        .append("g")
+        .attr("class", "node")
+        .attr("transform", (d) => `translate(${d.y},${d.x})`)
+        .on("click", (event, d) => {
+          if (d.data.type === "dir") {
+            const key = d.data.path;
+            if (userCollapsed.has(key)) userCollapsed.delete(key);
+            else userCollapsed.add(key);
+            renderTree(treeState);
+          }
+        });
+
+      node.each(function (d) {
+        const sel = d3.select(this);
+        const isDir = d.data.type === "dir";
+        const icon = isDir ? ICON_DIR : ICON_FILE;
+        const chevron = isDir ? (d.children ? "\u25BE " : "\u25B8 ") : "";
+        const label = chevron + d.data.name;
+        const activeAction = nodeActiveAction(d.data);
+        const strokeColor = activeAction ? ACTION_COLORS[activeAction] || "#a78bfa" : null;
+        const labelFill = d.data.isFocus
+          ? "#86efac"
+          : !d.data.visited
+            ? "#94a3b8"
+            : "#e2e8f0";
+        const labelX = 20;
+        const iconX = 2;
+        const estLabelW = Math.max(40, label.length * 6.2);
+
+        if (strokeColor) {
+          appendActiveCapsule(sel, isDir, label, labelX, estLabelW);
+          sel.select(".active-capsule").attr("stroke", strokeColor);
+        }
+
+        sel
+          .append("text")
+          .attr("x", iconX)
+          .attr("dy", "0.32em")
+          .attr("font-size", "12px")
+          .text(icon);
+
+        if (isDir) {
+          const capH = 18;
+          const capW = estLabelW + 12;
+          sel
+            .append("rect")
+            .attr("class", "dir-capsule")
+            .attr("x", labelX - 6)
+            .attr("y", -capH / 2)
+            .attr("width", capW)
+            .attr("height", capH)
+            .attr("rx", capH / 2)
+            .attr("fill", d.data.visited ? "#312e81" : "#27272a")
+            .attr("stroke", strokeColor || "#4f46e5");
+          sel
+            .append("text")
+            .attr("x", labelX)
+            .attr("dy", "0.32em")
+            .text(label)
+            .style("fill", labelFill);
+        } else {
+          if (d.data.isFocus) {
+            sel
+              .append("circle")
+              .attr("r", 4)
+              .attr("cx", labelX - 4)
+              .attr("cy", 0)
+              .attr("fill", "#22c55e")
+              .attr("opacity", 0.9);
+          }
+          sel
+            .append("text")
+            .attr("x", labelX)
+            .attr("dy", "0.32em")
+            .text(d.data.name)
+            .style("fill", labelFill);
+        }
+      });
+
+      zoomBehavior = d3
+        .zoom()
+        .scaleExtent([0.15, 3])
+        .on("zoom", (event) => {
+          zoomLayer.attr("transform", event.transform);
+        });
+      svg.call(zoomBehavior);
+
+      if (frameToActive) {
+        frameActiveNodes(svg, descendants, container);
+        frameToActive = false;
+      }
+    }
+
+    function syncHighlightsFromPayload(data) {
+      if (data.activeFiles?.length) {
+        for (const f of data.activeFiles) {
+          if (f.path && f.action) highlights.stamp(f.path, f.action);
+        }
+      }
+      if (data.tree) highlights.stampFromTree(data.tree);
+    }
+
+    function applyPayload(data) {
+      if (data.type === "file_progress") {
+        const p = MonitorHighlights.normPath(data.path);
+        if (data.active) inProgressPath = p;
+        else if (p === inProgressPath) inProgressPath = null;
+        frameToActive = true;
+        if (treeState) renderTree(treeState);
+        return;
+      }
+
+      if (data.type === "activity_event") {
+        highlights.stamp(data.path, data.action);
+        frameToActive = true;
+        if (treeState) renderTree(treeState);
+        return;
+      }
+
+      if (data.type === "session_reset") {
+        if (data.resetSeq != null) monitorResetSeq = data.resetSeq;
+        focusPath = null;
+        inProgressPath = null;
+        highlights.clear();
+        if (data.tree) treeState = cloneTree(data.tree);
+        else if (indexSnapshot) treeState = cloneTree(indexSnapshot);
+        hasFullIndex = !!indexSnapshot;
+        frameToActive = false;
+        if (treeState) renderTree(treeState);
+        return;
+      }
+
+      if (data.type === "project_index" && data.tree) {
+        indexSnapshot = cloneTree(data.tree);
+        treeState = cloneTree(data.tree);
+        hasFullIndex = true;
+        highlights.clear();
+        frameToActive = false;
+        renderTree(treeState);
+        return;
+      }
+
+      if (data.projectRoot || data.projectLabel) {
+        const el = document.getElementById("project-root-label");
+        el.textContent = data.projectRoot || data.projectLabel;
+        el.title = data.projectRoot || "";
+      }
+
+      if (data.activeFiles?.length) {
+        focusPath = data.activeFiles[0].path;
+        syncHighlightsFromPayload(data);
+      } else if (data.type === "update" && Array.isArray(data.activeFiles) && !data.activeFiles.length) {
+        focusPath = null;
+      }
+
+      if (data.tree && data.type === "update") {
+        if (data.resetSeq != null && data.resetSeq < monitorResetSeq) return;
+        if (data.resetSeq != null) monitorResetSeq = data.resetSeq;
+        if (!treeState && indexSnapshot) treeState = cloneTree(indexSnapshot);
+        if (treeState) {
+          treeApi.mergeActivityTree(treeState, data.tree);
+          treeApi.expandVisitedAncestors(treeState);
+        } else {
+          treeState = cloneTree(data.tree);
+        }
+        syncHighlightsFromPayload(data);
+        frameToActive = true;
+        renderTree(treeState);
+      } else if (data.tree) {
+        treeState = cloneTree(data.tree);
+        syncHighlightsFromPayload(data);
+        renderTree(treeState);
+      }
+    }
+
+    const ws = new WebSocket(`ws://${location.hostname}:8765`);
+    ws.onopen = () => setBadge("status-browser", "Browser: connected", "ok");
+    ws.onclose = () => setBadge("status-browser", "Browser: disconnected", "bad");
+    ws.onerror = () => setBadge("status-browser", "Browser: error", "bad");
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "status") {
+        if (data.status === "plugin_connected") setBadge("status-plugin", "Plugin: connected", "ok");
+        if (data.status === "plugin_waiting") setBadge("status-plugin", "Plugin: no server", "warn");
+        return;
+      }
+      applyPayload(data);
+    };
+
+    let resizeTimer;
+    new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (treeState) renderTree(treeState);
+      }, 80);
+    }).observe(document.getElementById("tree-chart"));
+  </script>
+</body>
+</html>

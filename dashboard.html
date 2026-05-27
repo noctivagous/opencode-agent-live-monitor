@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Live Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #09090b; }
+    body { display: flex; flex-direction: column; }
+    .tab-bar {
+      display: flex;
+      align-items: flex-end;
+      gap: 0;
+      padding: 8px 12px 0;
+      background: #18181b;
+      border-bottom: 1px solid #52525b;
+    }
+    .tab-btn {
+      position: relative;
+      margin-bottom: -1px;
+      margin-right: 2px;
+      padding: 7px 14px;
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: #a1a1aa;
+      background: #27272a;
+      border: 1px solid #52525b;
+      border-bottom: 1px solid #52525b;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    .tab-btn:hover {
+      color: #e4e4e7;
+      background: #3f3f46;
+    }
+    .tab-btn.active {
+      z-index: 1;
+      color: #fafafa;
+      background: #09090b;
+      border-color: #71717a;
+      border-bottom-color: #09090b;
+      box-shadow: none;
+    }
+    #tab-panels {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .tab-panel {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .tab-panel.active {
+      visibility: visible;
+      pointer-events: auto;
+    }
+  </style>
+</head>
+<body class="text-zinc-200">
+  <header class="flex-shrink-0 bg-zinc-950">
+    <div class="flex items-center gap-3 px-3 pt-2 pb-0">
+      <span class="text-sm font-semibold text-zinc-300 shrink-0">Agent Live Monitor</span>
+    </div>
+    <nav id="tabs" class="tab-bar" role="tablist" aria-label="Monitor views"></nav>
+  </header>
+  <main id="tab-panels" class="flex-1 min-h-0"></main>
+
+  <script>
+    const TABS = [
+      { id: "explorer", label: "Explorer", src: "/explorer", default: true },
+      { id: "tree", label: "Tree", src: "/tree" },
+      { id: "treemap", label: "Treemap", src: "/treemap" },
+      { id: "radial", label: "Radial", src: "/radial" },
+      { id: "horizon", label: "Horizon", src: "/horizon" },
+    ];
+
+    const nav = document.getElementById("tabs");
+    const panels = document.getElementById("tab-panels");
+    const frames = {};
+
+    function activateTab(id) {
+      for (const tab of TABS) {
+        const btn = document.getElementById(`tab-${tab.id}`);
+        const frame = frames[tab.id];
+        const active = tab.id === id;
+        btn?.classList.toggle("active", active);
+        btn?.setAttribute("aria-selected", active ? "true" : "false");
+        frame?.classList.toggle("active", active);
+      }
+      try {
+        localStorage.setItem("monitor-active-tab", id);
+      } catch {}
+    }
+
+    for (const tab of TABS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = `tab-${tab.id}`;
+      btn.className = "tab-btn" + (tab.default ? " active" : "");
+      btn.textContent = tab.label;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-selected", tab.default ? "true" : "false");
+      btn.addEventListener("click", () => activateTab(tab.id));
+      nav.appendChild(btn);
+
+      const frame = document.createElement("iframe");
+      frame.id = `panel-${tab.id}`;
+      frame.className = "tab-panel" + (tab.default ? " active" : "");
+      frame.src = tab.src;
+      frame.title = tab.label;
+      panels.appendChild(frame);
+      frames[tab.id] = frame;
+    }
+
+    let initial = TABS.find((t) => t.default)?.id || TABS[0].id;
+    try {
+      const saved = localStorage.getItem("monitor-active-tab");
+      if (saved && TABS.some((t) => t.id === saved)) initial = saved;
+    } catch {}
+    activateTab(initial);
+  </script>
+</body>
+</html>

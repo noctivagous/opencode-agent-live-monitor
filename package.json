@@ -1,0 +1,41 @@
+{
+  "name": "opencode-agent-live-monitor",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A real-time visualization dashboard for OpenCode agents. Watch the AI work live with a clean three-column interface: interactive project tree, active file workspace with visual change highlights, and activity explanations.",
+  "main": "index.js",
+  "bin": {
+    "opencode-agent-live-monitor": "bin/opencode-agent-live-monitor.js"
+  },
+  "files": [
+    "index.js",
+    "bin/",
+    "live-monitor-plugin.js",
+    "server.js",
+    "dashboard.html",
+    "index.html",
+    "index-tree.html",
+    "index-treemap.html",
+    "index-radial.html",
+    "index-horizon.html",
+    "monitor-tree.js",
+    "monitor-highlights.js",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [
+    "opencode-plugin",
+    "opencode",
+    "agent",
+    "monitor",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}
