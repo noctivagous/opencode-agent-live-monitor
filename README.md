@@ -231,7 +231,7 @@ cp live-monitor-plugin.js ~/.config/opencode/plugins/
 
 Restart OpenCode after any plugin change.
 
-### Option B — npm plugin (when published)
+### Option B — npm plugin (when published in the future)
 
 Add to `opencode.json`:
 
