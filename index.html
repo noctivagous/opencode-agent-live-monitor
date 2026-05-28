@@ -24,6 +24,8 @@
     }
     .file-card { transition: box-shadow 0.2s, border-color 0.2s; }
     .file-card.is-focus { box-shadow: 0 0 0 2px #22c55e66; }
+    .file-card.is-clickable { cursor: pointer; }
+    .file-card.is-clickable:hover { border-color: #a78bfa; }
     .pulse-once { animation: pulseOnce 0.6s ease-out; }
     @keyframes pulseOnce { 0% { background: #3b82f633; } 100% { background: transparent; } }
   </style>
@@ -69,9 +71,11 @@
     </div>
   </div>
 
+  <script src="/monitor-preview.js"></script>
   <script src="/monitor-badges.js"></script>
   <script>
     const { setBadge } = MonitorBadges;
+    const { init: initPreview, open: openPreview } = MonitorPreview;
     let focusPath = null;
     let activeFilesList = [];
 
@@ -114,7 +118,14 @@
           const focus = i === 0 && f.path === focusPath;
           const timeLabel = formatActiveTime(f.at);
           return `
-            <div class="file-card rounded-xl border border-zinc-700 bg-zinc-900 p-4 ${focus ? 'is-focus pulse-once' : ''}">
+            <div
+              class="file-card is-clickable rounded-xl border border-zinc-700 bg-zinc-900 p-4 ${focus ? 'is-focus pulse-once' : ''}"
+              role="button"
+              tabindex="0"
+              data-path="${f.path}"
+              data-label="${f.name}"
+              title="Click to preview"
+            >
               <div class="flex items-start justify-between gap-2">
                 <span class="text-lg text-zinc-400"><i class="${f.name.includes('.') ? 'fa-solid fa-file' : 'fa-solid fa-file-lines'}" aria-hidden="true"></i></span>
                 <div class="flex flex-col items-end gap-1 shrink-0">
@@ -137,6 +148,13 @@
       }).join('');
 
       stage.innerHTML = sections;
+    }
+
+    function previewFromCard(cardEl) {
+      const path = cardEl?.dataset?.path || "";
+      const label = cardEl?.dataset?.label || "";
+      if (!path) return;
+      openPreview(path, label);
     }
 
     function touchLastUpdate() {
@@ -270,6 +288,19 @@
       if (data.log) appendLog(data.log);
     }
 
+    document.getElementById("stage")?.addEventListener("click", (e) => {
+      const card = e.target?.closest?.(".file-card.is-clickable");
+      if (card) previewFromCard(card);
+    });
+    document.getElementById("stage")?.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const card = e.target?.closest?.(".file-card.is-clickable");
+      if (card) {
+        e.preventDefault();
+        previewFromCard(card);
+      }
+    });
+
     const ws = new WebSocket('ws://localhost:8765');
 
     ws.onopen = () => {
@@ -303,6 +334,8 @@
         applyPayload(data);
       }
     };
+
+    initPreview();
   </script>
 </body>
 </html>

@@ -81,7 +81,6 @@
         />
       </label>
       <span id="horizon-zoom-toolbar"></span>
-      <span id="action-legend"></span>
     </span>
   </header>
   <div id="horizon-viewport">
@@ -128,7 +127,6 @@
     const events = [];
     const fileMeta = new Map();
     const { createZoomHost, attachZoomControls } = MonitorZoom;
-    const { initLegend } = MonitorLegend;
     const { init: initPreview, open: openPreview } = MonitorPreview;
     const zoomHost = createZoomHost({ scaleExtent: [0.25, 3] });
     let timelineScale = 1;
@@ -847,11 +845,6 @@
       }
     }
 
-    initLegend(document.getElementById("action-legend"), {
-      colors: ACTION_COLORS,
-      fontPx: Math.round(10 * SCALE),
-      swatchPx: Math.round(8 * SCALE),
-    });
     updatePromptStatus();
     attachZoomControls(document.getElementById("horizon-zoom-toolbar"), zoomHost, {
       hint: "Drag chart to pan/zoom · scrollbar scrolls timeline",

@@ -47,7 +47,6 @@
     <span id="status-run" class="text-xs text-zinc-300 truncate max-w-[12rem]" title="">Connecting…</span>
     <nav id="breadcrumb" class="flex flex-wrap items-center gap-1 font-mono text-xs text-zinc-400 min-w-0"></nav>
     <span class="ml-auto flex flex-wrap items-center gap-2 shrink-0">
-      <span id="action-legend"></span>
       <span id="treemap-zoom-toolbar"></span>
     </span>
     <div class="hidden" aria-hidden="true">
@@ -283,7 +282,8 @@
     };
 
     function iconFill(d, isDir) {
-      if (!d.data.visited) return isDir ? "#71717a" : "#52525b";
+      // Match cell fill for untouched nodes but keep enough contrast to read icons.
+      if (!d.data.visited) return isDir ? "#71717a" : "#d4d4d8";
       return isDir ? "#a78bfa" : "#93c5fd";
     }
 
@@ -803,9 +803,7 @@
 
     ws.onmessage = (event) => applyMessage(JSON.parse(event.data));
 
-    const { initLegend } = MonitorLegend;
     const { attachZoomControls } = MonitorZoom;
-    initLegend(document.getElementById("action-legend"), { colors: ACTION_COLORS });
     attachZoomControls(document.getElementById("treemap-zoom-toolbar"), zoomHost, {
       hint: "Scroll/zoom · click folders to collapse",
     });

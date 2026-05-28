@@ -90,7 +90,10 @@
         title=""
       ></span>
     </div>
-    <nav id="tabs" class="tab-bar" role="tablist" aria-label="Monitor views"></nav>
+    <div class="tab-bar" role="tablist" aria-label="Monitor views">
+      <nav id="tabs" aria-label="Monitor views tabs"></nav>
+      <span id="dashboard-action-legend" class="ml-auto pb-1 pr-2"></span>
+    </div>
   </header>
   <main id="tab-panels" class="flex-1 min-h-0"></main>
 
@@ -124,6 +127,8 @@
     </div>
   </div>
 
+  <script src="/monitor-highlights.js"></script>
+  <script src="/monitor-legend.js"></script>
   <script>
     const TABS = [
       {
@@ -142,6 +147,12 @@
     const nav = document.getElementById("tabs");
     const panels = document.getElementById("tab-panels");
     const frames = {};
+    const { initLegend } = MonitorLegend;
+    initLegend(document.getElementById("dashboard-action-legend"), {
+      exclude: ["bash"],
+      fontPx: 11,
+      swatchPx: 9,
+    });
 
     function activateTab(id) {
       for (const tab of TABS) {

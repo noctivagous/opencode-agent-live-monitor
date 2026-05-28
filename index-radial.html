@@ -49,7 +49,6 @@
     <span id="status-plugin" class="monitor-badge monitor-badge--sm bg-zinc-800 text-zinc-400">Plugin…</span>
     <span id="project-root-label" class="text-xs text-zinc-500 font-mono truncate max-w-md" title="">—</span>
     <span class="ml-auto flex flex-wrap items-center gap-2">
-      <span id="action-legend"></span>
       <span id="radial-zoom-toolbar"></span>
     </span>
   </header>
@@ -62,7 +61,6 @@
     const RADIAL_ICON_BASE_PX = 10;
     const { createHighlightStore, ACTION_COLORS } = MonitorHighlights;
     const { createZoomHost, attachZoomControls } = MonitorZoom;
-    const { initLegend } = MonitorLegend;
     const { init: initPreview, open: openPreview } = MonitorPreview;
     const userCollapsed = new Set();
     const treeApi = createTreeApi(userCollapsed);
@@ -424,7 +422,6 @@
       applyPayload(data);
     };
 
-    initLegend(document.getElementById("action-legend"));
     attachZoomControls(document.getElementById("radial-zoom-toolbar"), zoomHost, {
       hint: "Scroll/zoom · click folders to collapse",
     });
