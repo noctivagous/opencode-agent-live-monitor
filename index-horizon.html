@@ -35,7 +35,7 @@
     .horizon-hscroll .thumb:active { cursor: grabbing; fill: #71717a; }
     .dir-label { fill: #a78bfa; font-weight: 600; }
     .file-label { fill: #a1a1aa; }
-    .file-row-hit { fill: transparent; cursor: pointer; }
+    .file-row-hit { fill: transparent; cursor: pointer; pointer-events: all; }
     .file-row-hit:hover { fill: rgba(255, 255, 255, 0.04); }
     .axis text { fill: #71717a; font-size: 17px; }
     .axis line, .axis path { stroke: #3f3f46; }
@@ -283,11 +283,11 @@
         .attr("width", layout.plotW)
         .attr("height", layout.chartBottom);
 
-      const labelsG = svg.append("g").attr("class", "horizon-labels");
       const plotG = svg.append("g").attr("clip-path", `url(#${CLIP_ID})`);
       const scrollPan = plotG.append("g").attr("class", "horizon-scroll-pan");
       const zoomG = scrollPan.append("g").attr("class", "horizon-timeline-scroll");
       const g = zoomG.append("g");
+      const labelsG = svg.append("g").attr("class", "horizon-labels");
 
       return { svg, labelsG, g, zoomG, scrollPan };
     }
